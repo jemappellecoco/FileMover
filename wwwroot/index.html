@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>待搬任務清單</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial;
+      margin: 32px;
+      background: #fafafa;
+    }
+    h1 {
+      font-size: 22px;
+      margin-bottom: 12px;
+    }
+    button {
+      padding: 8px 14px;
+      border: 0;
+      border-radius: 8px;
+      background: #111827;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: .6;
+      cursor: default;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 16px;
+      background: #fff;
+    }
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #eee;
+      font-size: 14px;
+      text-align: left;
+    }
+    th {
+      background: #f9fafb;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tr:hover td {
+      background: #f3f4f6;
+    }
+    .muted {
+      color: #6b7280;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>📂 待搬任務清單</h1>
+  <button id="btnReload">重新整理</button>
+  <span id="pendingCount" class="muted"></span>
+
+  <table id="pendingTable">
+    <thead>
+      <tr>
+        <th>HistoryId</th>
+        <th>FileId</th>
+        <th>節目名稱</th>   <!-- ProgramName -->
+        <th>檔名(UserBit)</th> <!-- FileName -->
+        <th>來源</th>
+        <th>目的地</th>
+        <th>FromStorageId</th>
+        <th>ToStorageId</th>
+      </tr>
+    </thead>
+
+    <tbody>
+      <tr><td colspan="6" style="text-align:center;color:#999;">載入中…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+    const API_PENDING = '/jobs/pending'; // 對應 JobsController
+
+    const $btnReload = document.getElementById('btnReload');
+    const $tableBody = document.querySelector('#pendingTable tbody');
+    const $count = document.getElementById('pendingCount');
+
+    async function loadPending() {
+      $btnReload.disabled = true;
+      $btnReload.textContent = '載入中…';
+      $count.textContent = '';
+
+      try {
+        const resp = await fetch(API_PENDING + '?take=200&ts=' + Date.now(), { cache: 'no-store' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const rows = await resp.json();
+
+        $tableBody.innerHTML = '';
+
+        if (!rows || rows.length === 0) {
+          $tableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
+          $count.textContent = '0 筆';
+          return;
+        }
+
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${r.historyId}</td>
+            <td>${r.fileId}</td>
+            <td>${r.programName || ''}</td>
+            <td>${r.fileName || ''}</td>
+            <td title="${r.sourcePath || ''}">${(r.sourcePath || '').replaceAll('\\\\', '\\').slice(-80)}</td>
+            <td title="${r.destPath || ''}">${(r.destPath || '').replaceAll('\\\\', '\\').slice(-80)}</td>
+            <td>${r.fromStorageId}</td>
+            <td>${r.toStorageId}</td>
+          `;
+          frag.appendChild(tr);
+        });
+
+        $tableBody.appendChild(frag);
+        $count.textContent = rows.length + ' 筆';
+      } catch (err) {
+        console.error(err);
+        $tableBody.innerHTML = `<tr><td colspan="6" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+      } finally {
+        $btnReload.disabled = false;
+        $btnReload.textContent = '重新整理';
+      }
+    }
+
+    $btnReload.addEventListener('click', loadPending);
+    loadPending(); // 頁面載入時自動顯示
+  </script>
+</body>
+</html>
