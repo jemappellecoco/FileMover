@@ -35,22 +35,16 @@ public class JobsController : ControllerBase
         var rows = await _repo.ListPendingAsync(take, ct);
 
         var data = rows.Select(x => new
-        {
-            x.HistoryId,
-            x.FileId,
-            x.FromStorageId,
-            x.ToStorageId,
-
-            // 節目名稱（實際是 filename 欄位）
-            ProgramName = x.FileName,
-
-            // 真正的檔名（UserBit）
-            FileName = x.UserBit,
-
-            // 改：完整路徑用 UserBit 拼接
-            SourcePath = Path.Combine(x.FromPath, x.UserBit ?? string.Empty),
-            DestPath   = Path.Combine(x.ToPath,   x.UserBit ?? string.Empty)
-        });
+            {
+                x.HistoryId,
+                x.FileId,
+                x.FromStorageId,
+                x.ToStorageId,
+                ProgramName = x.FileName,
+                FileName = x.UserBit,
+                SourcePath = x.FullSourcePath,   // 直接用唯讀屬性
+                DestPath = x.FullDestPath
+            });
 
         return Ok(data);
     }

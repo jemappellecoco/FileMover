@@ -4,7 +4,7 @@ using FileMoverWeb.Services;
 using System.Linq;
 using System.Collections.Generic;
 using System.IO;
-
+using System;
 namespace FileMoverWeb.Controllers;
 
 [ApiController]
@@ -66,18 +66,20 @@ public sealed class MoveController : ControllerBase
         {
             foreach (var it in g)
             {
+                // ✅ 這裡只用 SourcePath/DestPath，不要用不存在的 FromPath/UserBit/ToPath
                 var srcFi = new FileInfo(it.SourcePath);
                 var dstFi = new FileInfo(it.DestPath);
+
                 conflicts.Add(new ConflictItem
                 {
                     SourcePath    = it.SourcePath,
                     DestPath      = it.DestPath,
                     DestId        = it.DestId,
                     Kind          = ConflictKind.DuplicateInBatch,
-                    ExistingSize  = dstFi.Exists ? dstFi.Length : null,
-                    ExistingMtime = dstFi.Exists ? dstFi.LastWriteTimeUtc : null,
-                    SourceSize    = srcFi.Exists ? srcFi.Length : null,
-                    SourceMtime   = srcFi.Exists ? srcFi.LastWriteTimeUtc : null
+                    ExistingSize  = dstFi.Exists ? dstFi.Length : (long?)null,
+                    ExistingMtime = dstFi.Exists ? dstFi.LastWriteTimeUtc : (DateTime?)null,
+                    SourceSize    = srcFi.Exists ? srcFi.Length : (long?)null,
+                    SourceMtime   = srcFi.Exists ? srcFi.LastWriteTimeUtc : (DateTime?)null
                 });
             }
         }
@@ -97,8 +99,8 @@ public sealed class MoveController : ControllerBase
                     Kind          = ConflictKind.ExistsOnDisk,
                     ExistingSize  = dstFi.Length,
                     ExistingMtime = dstFi.LastWriteTimeUtc,
-                    SourceSize    = srcFi.Exists ? srcFi.Length : null,
-                    SourceMtime   = srcFi.Exists ? srcFi.LastWriteTimeUtc : null
+                    SourceSize    = srcFi.Exists ? srcFi.Length : (long?)null,
+                    SourceMtime   = srcFi.Exists ? srcFi.LastWriteTimeUtc : (DateTime?)null
                 });
             }
         }

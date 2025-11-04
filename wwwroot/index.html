@@ -32,12 +32,15 @@
       border-collapse: collapse;
       margin-top: 16px;
       background: #fff;
+      table-layout: fixed;
+      word-break: break-all;
     }
     th, td {
       padding: 8px 10px;
       border-bottom: 1px solid #eee;
       font-size: 14px;
       text-align: left;
+      vertical-align: top;
     }
     th {
       background: #f9fafb;
@@ -52,6 +55,15 @@
       color: #6b7280;
       margin-left: 8px;
     }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    td.path {
+      color: #111;
+    }
   </style>
 </head>
 
@@ -65,17 +77,17 @@
       <tr>
         <th>HistoryId</th>
         <th>FileId</th>
-        <th>節目名稱</th>   <!-- ProgramName -->
-        <th>檔名(UserBit)</th> <!-- FileName -->
-        <th>來源</th>
-        <th>目的地</th>
+        <th>節目名稱</th>
+        <th>檔名(UserBit)</th>
+        <th>來源（完整檔案路徑）</th>
+        <th>目的地（完整檔案路徑）</th>
         <th>FromStorageId</th>
         <th>ToStorageId</th>
       </tr>
     </thead>
 
     <tbody>
-      <tr><td colspan="6" style="text-align:center;color:#999;">載入中…</td></tr>
+      <tr><td colspan="8" style="text-align:center;color:#999;">載入中…</td></tr>
     </tbody>
   </table>
 
@@ -99,7 +111,7 @@
         $tableBody.innerHTML = '';
 
         if (!rows || rows.length === 0) {
-          $tableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
+          $tableBody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
           $count.textContent = '0 筆';
           return;
         }
@@ -112,8 +124,8 @@
             <td>${r.fileId}</td>
             <td>${r.programName || ''}</td>
             <td>${r.fileName || ''}</td>
-            <td title="${r.sourcePath || ''}">${(r.sourcePath || '').replaceAll('\\\\', '\\').slice(-80)}</td>
-            <td title="${r.destPath || ''}">${(r.destPath || '').replaceAll('\\\\', '\\').slice(-80)}</td>
+            <td class="mono path">${r.sourcePath ? r.sourcePath.replaceAll('\\\\', '\\') : ''}</td>
+            <td class="mono path">${r.destPath ? r.destPath.replaceAll('\\\\', '\\') : ''}</td>
             <td>${r.fromStorageId}</td>
             <td>${r.toStorageId}</td>
           `;
@@ -124,7 +136,7 @@
         $count.textContent = rows.length + ' 筆';
       } catch (err) {
         console.error(err);
-        $tableBody.innerHTML = `<tr><td colspan="6" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+        $tableBody.innerHTML = `<tr><td colspan="8" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
       } finally {
         $btnReload.disabled = false;
         $btnReload.textContent = '重新整理';
