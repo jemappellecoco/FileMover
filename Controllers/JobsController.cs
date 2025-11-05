@@ -16,7 +16,7 @@ public class JobsController : ControllerBase
     private readonly IJobProgress _progress;
     private readonly MoveWorker _worker;
     private readonly HistoryRepository _repo;
-
+    
     // 修正點：把 HistoryRepository 正式注入進來
     public JobsController(IJobProgress progress, MoveWorker worker, HistoryRepository repo)
     {
@@ -48,8 +48,51 @@ public class JobsController : ControllerBase
 
         return Ok(data);
     }
+    [HttpGet("history")]
+    public async Task<IActionResult> GetHistory(
+        [FromQuery] string status = "all",
+        [FromQuery] int take = 200,
+        CancellationToken ct = default)
+    {
+        var rows = await _repo.ListHistoryAsync(status, take, ct);
 
+        var data = rows.Select(r => new
+        {
+            r.HistoryId,
+            r.FileId,
 
+            // 沒有 ProgramName → 用 FileName 或 UserBit 代替
+            ProgramName = r.FileName ?? r.UserBit ?? string.Empty,
+            FileName    = r.UserBit  ?? r.FileName ?? string.Empty,
+
+            // 以現有欄位組完整路徑（FromPath/ToPath + UserBit.MXF）
+            SourcePath = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                ? Path.Combine(r.FromPath!, $"{r.UserBit}.MXF")
+                : null,
+            DestPath = (!string.IsNullOrWhiteSpace(r.ToPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                ? Path.Combine(r.ToPath!, $"{r.UserBit}.MXF")
+                : null,
+
+            r.FromStorageId,
+            r.ToStorageId,
+            r.UpdateTime,
+
+            // Status 是 int，不能用 ?? "字串"
+            Status = r.Status,
+            StatusText = r.Status switch
+            {
+                10 => "成功",
+                90 => "失敗",
+                1  => "進行中",
+                0  => "待處理",
+                _  => r.Status.ToString()
+            },
+
+            Error = r.Error
+        });
+
+        return Ok(data);
+}
     // 支援兩種命名：srcPath/dstPath 與 sourcePath/destObjectPath
     public sealed class CreateJobRequest
     {

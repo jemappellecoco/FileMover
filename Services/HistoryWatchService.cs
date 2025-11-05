@@ -41,24 +41,37 @@ namespace FileMoverWeb.Services
                     var req = new MoveBatchRequest
                     {
                         JobId = jobId,
-                        Items = tasks.Select(t => new MoveItem
+                        Items = tasks.Select(t =>
                         {
-                            HistoryId = t.HistoryId,
-                            FileId = t.FileId,
-                            FromStorageId = t.FromStorageId,
-                            ToStorageId = t.ToStorageId,
-                            SourcePath = Path.Combine(t.FromPath, t.FileName),
-                            DestPath = Path.Combine(t.ToPath, t.FileName),
-                            DestId = t.ToStorageId.ToString()
+                            // 優先用 UserBit.mxf；沒有 UserBit 時才使用原 FileName
+                            var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
+                                ? $"{t.UserBit}.mxf"
+                                : t.FileName;
+
+                            var src = Path.Combine(t.FromPath, fileName);
+                            var dst = Path.Combine(t.ToPath, fileName);
+
+                            return new MoveItem
+                            {
+                                HistoryId = t.HistoryId,
+                                FileId = t.FileId,
+                                FromStorageId = t.FromStorageId,
+                                ToStorageId = t.ToStorageId,
+                                SourcePath = src,
+                                DestPath = dst,
+                                // DestId = t.ToStorageId.ToString()
+                                DestId = $"{t.HistoryId}"
+                            };
                         }).ToList()
-                    };
+};
 
                     var results = await mover.RunAsync(req, stoppingToken);
 
                     foreach (var r in results)
                     {
                         if (r.Success) await repo.CompleteAsync(r.HistoryId, stoppingToken);
-                        else await repo.FailAsync(r.HistoryId, stoppingToken);
+                        // else await repo.FailAsync(r.HistoryId, stoppingToken);
+                        else await repo.FailAsync(r.HistoryId, r.Error, stoppingToken);
                     }
                 }
                 catch (Exception ex)

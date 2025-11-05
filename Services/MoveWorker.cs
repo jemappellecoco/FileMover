@@ -103,11 +103,8 @@ namespace FileMoverWeb.Services
         /// 同一個 DestId 的檔案以「順序」搬運（降低同一顆磁碟的讀寫競爭）。
         /// </summary>
         private async Task MoveGroupAsync(
-            string jobId,
-            string destId,
-            List<MoveItem> items,
-            ConcurrentBag<MoveResult> results,
-            CancellationToken ct)
+            string jobId, string destId, List<MoveItem> items,
+            ConcurrentBag<MoveResult> results, CancellationToken ct)
         {
             foreach (var item in items)
             {
@@ -115,6 +112,18 @@ namespace FileMoverWeb.Services
 
                 try
                 {
+                    // ✅ 來源不存在就當作 pass（成功略過）
+                    if (!File.Exists(item.SourcePath))
+                    {
+                        _logger.LogWarning("[{Job}] Source not found, skip as pass: {Src}", jobId, item.SourcePath);
+                        results.Add(new MoveResult
+                        {
+                            HistoryId = item.HistoryId ?? 0,
+                            Success = true
+                        });
+                        continue;
+                    }
+
                     var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
                     await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct).ConfigureAwait(false);
 
@@ -127,7 +136,6 @@ namespace FileMoverWeb.Services
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "[{Job}] 搬運失敗：{Src}", jobId, item.SourcePath);
-
                     results.Add(new MoveResult
                     {
                         HistoryId = item.HistoryId ?? 0,
@@ -149,13 +157,14 @@ namespace FileMoverWeb.Services
                 throw new ArgumentException("DestPath 不能為空白", nameof(dstPath));
 
             var destDir = Path.GetDirectoryName(dstPath)
-                          ?? throw new InvalidOperationException($"DestPath 無法取得目錄：{dstPath}");
+                        ?? throw new InvalidOperationException($"DestPath 無法取得目錄：{dstPath}");
 
             // 暫存檔放在目的目錄（避免跨磁碟 move）
             var tmpPath = Path.Combine(destDir, $".~{Path.GetFileName(dstPath)}.{Guid.NewGuid():N}.part");
 
             Directory.CreateDirectory(destDir);
 
+            long srcSize = 0;                  // ★ 記下來源大小，等等核對
             try
             {
                 using var inFs = new FileStream(
@@ -165,6 +174,8 @@ namespace FileMoverWeb.Services
                     FileShare.Read,
                     bufferSize: 1024 * 1024,
                     useAsync: true);
+
+                srcSize = inFs.Length;         // ★ 讀取來源檔大小
 
                 using var outFs = new FileStream(
                     tmpPath,
@@ -219,11 +230,24 @@ namespace FileMoverWeb.Services
                 if (File.Exists(tmpPath))
                     File.Delete(tmpPath);
             }
+            catch { /* 忽略清理失敗 */ }
+
+            // ★ 搬完後刪除來源：先核對目的檔大小一致再刪
+            try
+            {
+                var dstInfo = new FileInfo(dstPath);
+                if (dstInfo.Exists && dstInfo.Length == srcSize)
+                {
+                    File.Delete(srcPath);      // ✅ 確認成功才刪來源
+                }
+                // 若大小不一致就保留來源，交由重試/人工處理
+            }
             catch
             {
-                // 忽略清理失敗
+                // 刪除來源失敗不影響搬運成果（例如權限/鎖定），安全忽略或之後再處理
             }
         }
+
 
         // ===== Helpers =====
 

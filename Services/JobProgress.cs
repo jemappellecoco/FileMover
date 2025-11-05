@@ -65,5 +65,9 @@ namespace FileMoverWeb.Services
             foreach (var key in _map.Keys.Where(k => k.jobId == jobId).ToList())
                 _map.TryRemove(key, out _);
         }
+        public IReadOnlyCollection<string> ActiveJobIds()
+        {
+            return _map.Keys.Select(k => k.jobId).Distinct().ToList();
+        }
     }
 }
