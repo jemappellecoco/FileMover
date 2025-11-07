@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 
 namespace FileMoverWeb.Controllers
 {
+   // Controllers/HistoryController.cs
     [ApiController]
     [Route("history")]
     public class HistoryController : ControllerBase
@@ -15,53 +16,37 @@ namespace FileMoverWeb.Controllers
         private readonly HistoryRepository _repo;
         public HistoryController(HistoryRepository repo) { _repo = repo; }
 
-        // GET /history?status=10|90|1|0|all&take=200
+        // 只顯示成功/失敗（預設 200 筆，可用 take 覆寫）
         [HttpGet]
         public async Task<IActionResult> Get([FromQuery] string status = "all",
-                                             [FromQuery] int take = 200,
-                                             CancellationToken ct = default)
+                                            [FromQuery] int take = 200,
+                                            CancellationToken ct = default)
         {
+            if (take <= 0) take = 50;
+            if (take > 1000) take = 1000;
+
+            // 這裡 status = all 時，repo 會只撈 10/90（見上方 whereStatus）
             var rows = await _repo.ListHistoryAsync(status, take, ct);
 
             var data = rows.Select(r => new
             {
                 r.HistoryId,
                 r.FileId,
-
-                // HistoryRow 沒有 ProgramName → 用 FileName 或 UserBit 代替
                 ProgramName = r.FileName ?? r.UserBit ?? string.Empty,
                 FileName    = r.UserBit  ?? r.FileName ?? string.Empty,
-
-                // 以現有欄位組完整路徑（FromPath/ToPath + UserBit.MXF）
-                SourcePath = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
-                    ? Path.Combine(r.FromPath!, $"{r.UserBit}.MXF")
-                    : null,
-                DestPath = (!string.IsNullOrWhiteSpace(r.ToPath) && !string.IsNullOrWhiteSpace(r.UserBit))
-                    ? Path.Combine(r.ToPath!, $"{r.UserBit}.MXF")
-                    : null,
-
+                SourcePath  = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                                ? Path.Combine(r.FromPath!, $"{r.UserBit}.mxf") : null,
+                DestPath    = (!string.IsNullOrWhiteSpace(r.ToPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                                ? Path.Combine(r.ToPath!, $"{r.UserBit}.mxf") : null,
                 r.FromStorageId,
-                r.FromName,
                 r.ToStorageId,
-                r.ToName,
-
                 r.UpdateTime,
-
-                // Status 是 int，不能用 ?? "字串"
                 Status = r.Status,
-                StatusText = r.Status switch
-                {
-                    10 => "成功",
-                    90 => "失敗",
-                    1  => "進行中",
-                    0  => "待處理",
-                    _  => r.Status.ToString()
-                },
-
-                Error = r.Error
+                StatusText = r.Status == 11 ? "成功" : "失敗"
             });
 
             return Ok(data);
         }
     }
+
 }

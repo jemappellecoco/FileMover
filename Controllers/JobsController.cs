@@ -17,7 +17,6 @@ public class JobsController : ControllerBase
     private readonly MoveWorker _worker;
     private readonly HistoryRepository _repo;
     
-    // 修正點：把 HistoryRepository 正式注入進來
     public JobsController(IJobProgress progress, MoveWorker worker, HistoryRepository repo)
     {
         _progress = progress;
@@ -25,7 +24,7 @@ public class JobsController : ControllerBase
         _repo = repo;
     }
 
-    // 0) 列出 status=0 的待搬任務：GET /jobs/pending
+    // 0) 列出 status=0/-1/1 的待處理任務：GET /jobs/pending
     [HttpGet("pending")]
     public async Task<IActionResult> GetPending([FromQuery] int take = 50, CancellationToken ct = default)
     {
@@ -34,20 +33,40 @@ public class JobsController : ControllerBase
 
         var rows = await _repo.ListPendingAsync(take, ct);
 
-        var data = rows.Select(x => new
+        var data = rows.Select(x =>
+        {
+            // 以 Action 判斷任務類型（你的 repo 有 SELECT h.action AS Action）
+            var kind = (x.Action ?? "").Trim().ToLowerInvariant() switch
+            {
+                "delete" or "刪除" => "delete",
+                _ => "move"
+            };
+
+            return new
             {
                 x.HistoryId,
                 x.FileId,
                 x.FromStorageId,
                 x.ToStorageId,
-                ProgramName = x.FileName,
-                FileName = x.UserBit,
-                SourcePath = x.FullSourcePath,   // 直接用唯讀屬性
-                DestPath = x.FullDestPath
-            });
+
+                // 顯示名稱：優先 UserBit，再退回 FileName
+                ProgramName = string.IsNullOrWhiteSpace(x.UserBit) ? x.FileName : x.UserBit,
+                FileName    = x.UserBit ?? x.FileName,
+
+                // 直接用 HistoryTask 的唯讀屬性（已自動組 .MXF）
+                SourcePath  = x.FullSourcePath,
+                DestPath    = x.FullDestPath,
+
+                // 新增：任務類型給前端顯示/過濾用
+                TaskKind    = kind,                // "move" 或 "delete"
+                RequestedBy = x.RequestedBy ?? "-" // 誰發的
+            };
+        });
 
         return Ok(data);
     }
+
+    // 歷史：GET /jobs/history?status=all|move|delete|success|fail|11|12|91|92
     [HttpGet("history")]
     public async Task<IActionResult> GetHistory(
         [FromQuery] string status = "all",
@@ -61,11 +80,9 @@ public class JobsController : ControllerBase
             r.HistoryId,
             r.FileId,
 
-            // 沒有 ProgramName → 用 FileName 或 UserBit 代替
             ProgramName = r.FileName ?? r.UserBit ?? string.Empty,
             FileName    = r.UserBit  ?? r.FileName ?? string.Empty,
 
-            // 以現有欄位組完整路徑（FromPath/ToPath + UserBit.MXF）
             SourcePath = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
                 ? Path.Combine(r.FromPath!, $"{r.UserBit}.MXF")
                 : null,
@@ -77,22 +94,25 @@ public class JobsController : ControllerBase
             r.ToStorageId,
             r.UpdateTime,
 
-            // Status 是 int，不能用 ?? "字串"
             Status = r.Status,
+            // ★ 新增 12/92 的顯示文字
             StatusText = r.Status switch
             {
-                10 => "成功",
-                90 => "失敗",
+                12 => "刪除成功",
+                92 => "刪除失敗",
+                11 => "成功",
+                91 => "失敗",
                 1  => "進行中",
                 0  => "待處理",
                 _  => r.Status.ToString()
             },
 
-            Error = r.Error
+            r.Error
         });
 
         return Ok(data);
-}
+    }
+
     // 支援兩種命名：srcPath/dstPath 與 sourcePath/destObjectPath
     public sealed class CreateJobRequest
     {
@@ -118,7 +138,6 @@ public class JobsController : ControllerBase
         if (!System.IO.File.Exists(req.Src))
             return BadRequest(new { message = "Source not found." });
 
-        // 產生新的 jobId，包成「批次請求」送給新版 MoveWorker
         var jobId = Guid.NewGuid().ToString("N");
         var batch = new MoveBatchRequest
         {
@@ -129,7 +148,7 @@ public class JobsController : ControllerBase
                 {
                     SourcePath = req.Src,
                     DestPath   = req.Dst,
-                    DestId     = "Default" // 統一到單一目的地群組
+                    DestId     = "Default"
                 }
             }
         };
@@ -139,7 +158,6 @@ public class JobsController : ControllerBase
         return Ok(new { jobId, status = "Pending" });
     }
 
-    // 查詢單檔進度（把新版的「依目的地多筆」聚合成一筆回傳）
     [HttpGet("{jobId}")]
     public IActionResult Get(string jobId)
     {
@@ -165,7 +183,6 @@ public class JobsController : ControllerBase
         });
     }
 
-    // SSE 事件（相容舊前端）：根據聚合結果推送事件
     [HttpGet("{jobId}/events")]
     public async Task GetEvents(string jobId, CancellationToken ct)
     {
@@ -173,7 +190,6 @@ public class JobsController : ControllerBase
         Response.Headers["X-Accel-Buffering"] = "no";
         Response.ContentType = "text/event-stream";
 
-        // 簡易版本：每 300ms 取一次 snapshot
         while (!ct.IsCancellationRequested)
         {
             var list = _progress.Snapshot(jobId);
@@ -201,11 +217,10 @@ public class JobsController : ControllerBase
         }
     }
 
-    // 取消（相容舊前端）：這裡做簡單清理
     [HttpPost("{jobId}/cancel")]
     public IActionResult Cancel(string jobId)
     {
-        _progress.CompleteJob(jobId); // 簡單移除快照；如需真正取消，另行加上 CancellationToken 管理
+        _progress.CompleteJob(jobId);
         return Ok(new { jobId, status = "Canceled" });
     }
 }

@@ -83,7 +83,6 @@ C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\rjimswa.dswa.cache.json
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\rjsmrazor.dswa.cache.json
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\rjsmcshtml.dswa.cache.json
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\scopedcss\bundle\FileMoverWeb.styles.css
-C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\e3q058aa4g-m4cd9b0yz3.gz
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\c2xli41tx7-n9n3tzqlzu.gz
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\staticwebassets.build.json
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\staticwebassets.build.json.cache
@@ -95,4 +94,5 @@ C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\refint\FileMoverWeb.dll
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.pdb
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.genruntimeconfig.cache
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\ref\FileMoverWeb.dll
-C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\s2ojdjha5j-5uoicfwz3w.gz
+C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\e3q058aa4g-43gp6fsm4d.gz
+C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\s2ojdjha5j-nup5e5hdre.gz

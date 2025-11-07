@@ -47,8 +47,10 @@
     <label>狀態：
       <select id="selStatus">
         <option value="all">全部</option>
-        <option value="10">成功</option>
-        <option value="90">失敗</option>
+        <option value="11">搬移成功</option>
+        <option value="91">搬移失敗</option>
+        <option value="12">刪除成功</option>
+        <option value="92">刪除失敗</option>
       </select>
     </label>
 
@@ -82,144 +84,175 @@
     </tbody>
   </table>
 
-  <script>
-    // === 設定你的 API 路徑 ===
-    // 期望後端：GET /jobs/history?status=10|90|all&take=200
-    // 回傳陣列：[{historyId,fileId,programName,fileName,sourcePath,destPath,fromStorageId,toStorageId,updateTime,status,error}]
-    const API_HISTORY = '/jobs/history';
+<script>
+  // === 設定你的 API 路徑 ===
+  // 期望後端：GET /history?status=all&take=200
+  const API_HISTORY = '/history';
 
-    const $selStatus = document.getElementById('selStatus');
-    const $inpTake   = document.getElementById('inpTake');
-    const $btnReload = document.getElementById('btnReload');
-    const $btnExport = document.getElementById('btnExport');
-    const $tbody     = document.querySelector('#histTable tbody');
-    const $count     = document.getElementById('rowCount');
+  const $selStatus = document.getElementById('selStatus');
+  const $inpTake   = document.getElementById('inpTake');
+  const $btnReload = document.getElementById('btnReload');
+  const $btnExport = document.getElementById('btnExport');
+  const $tbody     = document.querySelector('#histTable tbody');
+  const $count     = document.getElementById('rowCount');
 
-    /** 目前載入的資料（給 CSV 匯出用） */
-    let currentRows = [];
+  // 所有資料（從後端撈一次），與目前顯示的資料
+  let allRows = [];
+  let currentRows = [];
 
-    function fmtDate(s) {
-      if (!s) return '';
-      const d = new Date(s);
-      if (isNaN(d)) return s;
-      // 以本地時間顯示
-      return d.toLocaleString();
-    }
+  function fmtDate(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d)) return s;
+    return d.toLocaleString(); // 以本地時間顯示
+  }
 
-    function pill(status) {
-      if (status === '10') return '<span class="status-pill ok">成功</span>';
-      if (status === '90') return '<span class="status-pill fail">失敗</span>';
-      return `<span class="status-pill">${status ?? ''}</span>`;
-    }
 
-    async function loadHistory() {
-      $btnReload.disabled = true;
-      $btnReload.textContent = '載入中…';
-      $count.textContent = '';
-      $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:#999;">載入中…</td></tr>`;
+  // === 前端渲染表格 ===
+function render(rows) {
+  const frag = document.createDocumentFragment();
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const src = (r.sourcePath || '').replaceAll('\\\\', '\\');
+    const dst = (r.destPath || '').replaceAll('\\\\', '\\');
+    const err = r.error || '';
+    const label = statusLabelFromCode(r.status); // ← 以碼值轉標籤
 
-      const status = $selStatus.value || 'all';
-      const take = Math.max(1, parseInt($inpTake.value || '200', 10));
+    tr.innerHTML = `
+      <td>${r.historyId ?? ''}</td>
+      <td>${r.fileId ?? ''}</td>
+      <td>${r.programName || ''}</td>
+      <td>${r.fileName || ''}</td>
+      <td class="mono path" title="${src}">${src}</td>
+      <td class="mono path" title="${dst}">${dst}</td>
+      <td>${r.fromStorageId ?? ''}</td>
+      <td>${r.toStorageId ?? ''}</td>
+      <td>${fmtDate(r.updateTime)}</td>
+      <td>${pillByLabel(label)}</td>   <!-- ← 用新膠囊 -->
+      <td class="mono" title="${err}">${err.length > 120 ? (err.slice(0,120) + '…') : err}</td>
+    `;
+    frag.appendChild(tr);
+  });
+  $tbody.innerHTML = '';
+  $tbody.appendChild(frag);
+  $count.textContent = rows.length + ' 筆';
+  currentRows = rows;
+}
 
-      try {
-        const url = `${API_HISTORY}?status=${encodeURIComponent(status)}&take=${take}&ts=${Date.now()}`;
-        const resp = await fetch(url, { cache: 'no-store' });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const rows = await resp.json();
-        currentRows = Array.isArray(rows) ? rows : [];
+function statusLabelFromCode(code) {
+  const n = Number(code);
+  if (n === 11) return '搬移成功';
+  if (n === 91) return '搬移失敗';
+  if (n === 12) return '刪除成功';
+  if (n === 92) return '刪除失敗';
+  if (n === 1)  return '進行中';
+  if (n === 0)  return '待處理';
+  return String(code ?? '');
+}
 
-        if (currentRows.length === 0) {
-          $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
-          $count.textContent = '0 筆';
-          return;
-        }
+function pillByLabel(label) {
+  if (label === '搬移成功' || label === '刪除成功')
+    return `<span class="status-pill ok">${label}</span>`;
+  if (label === '搬移失敗' || label === '刪除失敗')
+    return `<span class="status-pill fail">${label}</span>`;
+  return `<span class="status-pill">${label}</span>`;
+}
+  // === 根據下拉選單過濾 ===
+function filterAndRender() {
+  const st = $selStatus.value || 'all';
+  let rows = allRows;
+  if (st !== 'all') {
+    const want = Number(st);
+    rows = allRows.filter(r => Number(r.status) === want);
+  }
+  render(rows);
+}
 
-        const frag = document.createDocumentFragment();
-        currentRows.forEach(r => {
-          const tr = document.createElement('tr');
-          const src = (r.sourcePath || '').replaceAll('\\\\','\\');
-          const dst = (r.destPath || '').replaceAll('\\\\','\\');
-          const err = r.error || '';
-          tr.innerHTML = `
-            <td>${r.historyId ?? ''}</td>
-            <td>${r.fileId ?? ''}</td>
-            <td>${r.programName || ''}</td>
-            <td>${r.fileName || ''}</td>
-            <td class="mono path" title="${src}">${src}</td>
-            <td class="mono path" title="${dst}">${dst}</td>
-            <td>${r.fromStorageId ?? ''}</td>
-            <td>${r.toStorageId ?? ''}</td>
-            <td>${fmtDate(r.updateTime)}</td>
-            <td>${pill(r.status)}</td>
-            <td class="mono" title="${err}">${err.length > 120 ? (err.slice(0,120) + '…') : err}</td>
-          `;
-          frag.appendChild(tr);
-        });
+  // === 從後端載入資料 ===
+  async function loadHistory() {
+    $btnReload.disabled = true;
+    $btnReload.textContent = '載入中…';
+    $count.textContent = '';
+    $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:#999;">載入中…</td></tr>`;
 
-        $tbody.innerHTML = '';
-        $tbody.appendChild(frag);
-        $count.textContent = currentRows.length + ' 筆';
-      } catch (err) {
-        console.error(err);
-        $tbody.innerHTML = `<tr><td colspan="11" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
-      } finally {
-        $btnReload.disabled = false;
-        $btnReload.textContent = '重新整理';
+    const take = Math.max(1, parseInt($inpTake.value || '200', 10));
+
+    try {
+      const url = `${API_HISTORY}?status=all&take=${take}&ts=${Date.now()}`;
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const rows = await resp.json();
+      allRows = Array.isArray(rows) ? rows : [];
+
+      if (allRows.length === 0) {
+        $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
+        $count.textContent = '0 筆';
+        return;
       }
+      filterAndRender(); // 依當前狀態顯示
+    } catch (err) {
+      console.error(err);
+      $tbody.innerHTML = `<tr><td colspan="11" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+    } finally {
+      $btnReload.disabled = false;
+      $btnReload.textContent = '重新整理';
     }
+  }
 
-    function exportCSV() {
-      if (!currentRows || currentRows.length === 0) return;
+  // === 匯出 CSV ===
+  function exportCSV() {
+  if (!currentRows || currentRows.length === 0) return;
 
-      const header = [
-        'HistoryId','FileId','ProgramName','FileName',
-        'SourcePath','DestPath','FromStorageId','ToStorageId',
-        'UpdateTime','Status','Error'
-      ];
-      const lines = [header.join(',')];
+  const header = [
+    'HistoryId','FileId','ProgramName','FileName',
+    'SourcePath','DestPath','FromStorageId','ToStorageId',
+    'UpdateTime','Status','Error'
+  ];
+  const lines = [header.join(',')];
 
-      for (const r of currentRows) {
-        const row = [
-          r.historyId ?? '',
-          r.fileId ?? '',
-          safeCSV(r.programName),
-          safeCSV(r.fileName),
-          safeCSV((r.sourcePath || '').replaceAll('\\\\','\\')),
-          safeCSV((r.destPath || '').replaceAll('\\\\','\\')),
-          r.fromStorageId ?? '',
-          r.toStorageId ?? '',
-          fmtDate(r.updateTime),
-          r.status ?? '',
-          safeCSV(r.error || '')
-        ];
-        lines.push(row.join(','));
-      }
+  for (const r of currentRows) {
+    const label = statusLabelFromCode(r.status);  // 🟢 新增：依碼值取標籤
+    const row = [
+      r.historyId ?? '',
+      r.fileId ?? '',
+      safeCSV(r.programName),
+      safeCSV(r.fileName),
+      safeCSV((r.sourcePath || '').replaceAll('\\\\','\\')),
+      safeCSV((r.destPath || '').replaceAll('\\\\','\\')),
+      r.fromStorageId ?? '',
+      r.toStorageId ?? '',
+      fmtDate(r.updateTime),
+      label,                                       // 🟢 改成中文標籤
+      safeCSV(r.error || '')
+    ];
+    lines.push(row.join(','));
+  }
 
-      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `history_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `history_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 
-      function safeCSV(s) {
-        if (s == null) return '';
-        const t = String(s).replaceAll('"', '""');
-        // 如果含有逗號、換行或引號，就包起來
-        return /[",\n]/.test(t) ? `"${t}"` : t;
-      }
-    }
+  function safeCSV(s) {
+    if (s == null) return '';
+    const t = String(s).replaceAll('"', '""');
+    return /[",\n]/.test(t) ? `"${t}"` : t;
+  }
+}
+  // === 綁定事件 ===
+  $btnReload.addEventListener('click', loadHistory);
+  $btnExport.addEventListener('click', exportCSV);
+  $selStatus.addEventListener('change', filterAndRender);
+  $inpTake.addEventListener('change', loadHistory);
 
-    $btnReload.addEventListener('click', loadHistory);
-    $btnExport.addEventListener('click', exportCSV);
-    $selStatus.addEventListener('change', loadHistory);
-    $inpTake.addEventListener('change', loadHistory);
+  // === 初次載入 ===
+  loadHistory();
+</script>
 
-    // 初次載入
-    loadHistory();
-  </script>
 </body>
 </html>
