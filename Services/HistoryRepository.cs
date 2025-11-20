@@ -18,6 +18,10 @@ namespace FileMoverWeb.Services
     /// </summary>
     public sealed class HistoryTask
     {
+            // ⭐ 來源 / 目的 Storage 所屬樓層 group
+        public string? FromGroup { get; set; }
+        public string? ToGroup   { get; set; }
+
         public int HistoryId { get; set; }
         public int FileId { get; set; }
 
@@ -25,7 +29,7 @@ namespace FileMoverWeb.Services
         public string FileName { get; set; } = "";
         public long FileSize { get; set; }             // FileData.filesize
         public string? UserBit { get; set; }           // FileData.UserBit
-           // Channel.channel_name
+
         // 這筆 history 有沒有對到 FileData
         public bool HasFileData { get; set; }          // 0 = 沒有, 1 = 有
 
@@ -33,8 +37,7 @@ namespace FileMoverWeb.Services
         public int FromStorageId { get; set; }
         public string? FromName { get; set; }          // Storage.storage_name
         public string FromPath { get; set; } = "";
-        // public int ToStorageId { get; set; }
-        public int? ToStorageId { get; set; } 
+        public int? ToStorageId { get; set; }
         public string? ToName { get; set; }            // Storage.storage_name
         public string ToPath { get; set; } = "";
 
@@ -43,8 +46,9 @@ namespace FileMoverWeb.Services
         public string? Action { get; set; }            // FileData_History.action
         public DateTime CreateTime { get; set; }       // FileData_History.create_time
         // 目前狀態（0 / 1 / -1）
-            public int FileStatus { get; set; }
-                // 後端自動組完整路徑（含 .mxf）
+        public int FileStatus { get; set; }
+
+        // 後端自動組完整路徑（含 .mxf）
         public string? FullSourcePath =>
             string.IsNullOrWhiteSpace(FromPath) || string.IsNullOrWhiteSpace(UserBit)
                 ? null
@@ -121,6 +125,7 @@ ORDER BY
             public async Task<List<HistoryTask>> ClaimAsync(
                 int batchSize,
                 int retryMinutes,
+                string? group,
                 CancellationToken ct)
             {
                 using var conn = _factory.Create();
@@ -132,9 +137,11 @@ ORDER BY
             ;WITH P AS (
             SELECT TOP (@n) h.id
             FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
+            JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id 
             WHERE
                     -- ✅ 只處理 copy 任務
                     h.action = 'copy'
+                AND (@group IS NULL OR s_from.set_group = @group)
                 AND (
                         -- 新任務：0
                         h.file_status = 0
@@ -150,7 +157,7 @@ ORDER BY
             OUTPUT inserted.id
             FROM dbo.FileData_History h
             JOIN P ON P.id = h.id;",
-                        new { n = batchSize, retryMin = retryMinutes },
+                        new { n = batchSize, retryMin = retryMinutes , group },
                         transaction: tran,
                         cancellationToken: ct));
 
@@ -171,6 +178,8 @@ ORDER BY
                 f.UserBit         AS UserBit,
                 s_from.location   AS FromPath,
                 s_to.location     AS ToPath,
+                s_from.set_group  AS FromGroup,   
+                s_to.set_group    AS ToGroup,     
                 CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData   -- ★ NEW
             FROM dbo.FileData_History h
             LEFT JOIN dbo.FileData   f     ON f.id      = h.file_id       -- ★ 改 LEFT JOIN
@@ -356,5 +365,27 @@ WHERE id = @historyId;";
         new CommandDefinition(sql, new { historyId, statusCode }, cancellationToken: ct));
 }
 
+
+
+public async Task<int> GetRestoreStorageIdAsync(string group, CancellationToken ct)
+{
+    using var conn = _factory.Create();
+
+    var ids = (await conn.QueryAsync<int>(
+        new CommandDefinition(@"
+SELECT id
+FROM dbo.Storage
+WHERE set_group = @g
+  AND type = 'RESTORE';
+", new { g = group }, cancellationToken: ct))).ToList();
+
+    if (ids.Count == 0)
+        throw new InvalidOperationException($"找不到 {group} 的 RESTORE storage (type='RESTORE')");
+
+    if (ids.Count > 1)
+        throw new InvalidOperationException($"{group} 有超過一個 RESTORE，請檢查 Storage 設定");
+
+    return ids[0];
+}
     }
 }

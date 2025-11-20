@@ -11,12 +11,12 @@ using Microsoft.Extensions.DependencyInjection;
 using FileMoverWeb.Models;
 using FileMoverWeb.Services;
 using System.Collections.Generic;
+
 namespace FileMoverWeb.Services
 {
     public sealed class HistoryWatchService : BackgroundService
     {
         private readonly ILogger<HistoryWatchService> _log;
-        
         private readonly IServiceProvider _sp;
         private readonly IConfiguration _cfg;
 
@@ -25,8 +25,10 @@ namespace FileMoverWeb.Services
 
         // ★ 最多嘗試幾次（第一次 + 兩次 retry = 3 次）
         private const int MaxMoveAttempts = 3;
+
         private readonly IJobProgress _progress;
-       public HistoryWatchService(
+
+        public HistoryWatchService(
             ILogger<HistoryWatchService> log,
             IServiceProvider sp,
             IConfiguration cfg,
@@ -41,38 +43,88 @@ namespace FileMoverWeb.Services
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             var interval = _cfg.GetValue<int>("Watcher:IntervalSeconds", 5);
-            var batch = _cfg.GetValue<int>("Watcher:BatchSize", 20);
-            var retryMin  = _cfg.GetValue<int>("Watcher:RetryMinutes", 5);
-            _log.LogInformation("HistoryWatchService started: every {sec}s, batch {batch}", interval, batch);
+            var batch    = _cfg.GetValue<int>("Watcher:BatchSize", 20);
+            var retryMin = _cfg.GetValue<int>("Watcher:RetryMinutes", 5);
 
+            // ★ 樓層 group 由 appsettings.XXX.json 決定
+            var group = _cfg.GetValue<string>("FloorRouting:Group");
+
+            _log.LogInformation("HistoryWatchService starting: every {sec}s, batch {batch}", interval, batch);
+
+            if (string.IsNullOrWhiteSpace(group))
+            {
+                throw new InvalidOperationException(
+                    "請在 appsettings 裡設定 FloorRouting:Group（例如：\"4F\" 或 \"7F\"）");
+            }
+
+            // ★ 先從 DB 找到本樓層的 RESTORE StorageId（之後跨層兩階段會用）
+            int restoreId;
+            using (var scope = _sp.CreateScope())
+            {
+                var repo = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
+                restoreId = await repo.GetRestoreStorageIdAsync(group, stoppingToken);
+            }
+
+            _log.LogInformation(
+                "HistoryWatchService started for group {group}, RESTORE = {restoreId}",
+                group, restoreId);
+
+            // ==========================
+            //       主要輪詢迴圈
+            // ==========================
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
                     using var scope = _sp.CreateScope();
-                    var repo = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
+                    var repo  = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
                     var mover = scope.ServiceProvider.GetRequiredService<MoveWorker>();
 
                     // 1) 搬移任務（status = 0 → 1）
-                    var moveTasks = await repo.ClaimAsync(batch, retryMin, stoppingToken);
-                    Console.WriteLine($"[MOVE-CLAIM] {DateTime.Now:HH:mm:ss} claimed {moveTasks.Count} tasks: " +
-                    string.Join(",", moveTasks.Select(t => t.HistoryId)));
+                    var moveTasks = await repo.ClaimAsync(batch, retryMin, group, stoppingToken);
+
+                    Console.WriteLine(
+                            $"[MOVE-CLAIM] {DateTime.Now:HH:mm:ss} claimed {moveTasks.Count} tasks: " +
+                            string.Join(",", moveTasks.Select(t => $"{t.HistoryId}({t.FromGroup}->{t.ToGroup})")));
                     if (moveTasks.Count > 0)
                     {
-                        var jobId = Guid.NewGuid().ToString("N");
-                        var req = new MoveBatchRequest
+                        // ==========================
+                        // A. 先拆成「同層 / 跨層」
+                        // ==========================
+                        var sameFloorTasks = moveTasks
+                            .Where(t =>
+                                !string.IsNullOrEmpty(t.ToGroup) &&
+                                t.FromGroup != null &&
+                                t.FromGroup.Equals(t.ToGroup, StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+
+                        var crossFloorTasks = moveTasks
+                            .Where(t =>
+                                string.IsNullOrEmpty(t.ToGroup) ||
+                                t.FromGroup == null ||
+                                !t.FromGroup.Equals(t.ToGroup, StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+
+                        // =======================
+                        // A-1. 同層任務：照原本邏輯搬
+                        // =======================
+                        if (sameFloorTasks.Count > 0)
                         {
-                            JobId = jobId,
-                            Items = moveTasks.Select(t =>
+                            var jobId = Guid.NewGuid().ToString("N");
+
+                            var req = new MoveBatchRequest
                             {
-                                var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
-                                    ? $"{t.UserBit}.MXF"
-                                    : t.FileName;
+                                JobId = jobId,
+                                Items = sameFloorTasks.Select(t =>
+                                {
+                                    var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
+                                        ? $"{t.UserBit}.MXF"
+                                        : t.FileName;
 
-                                var src = Path.Combine(t.FromPath, fileName);
-                                var dst = Path.Combine(t.ToPath, fileName);
+                                    var src = Path.Combine(t.FromPath, fileName);
+                                    var dst = Path.Combine(t.ToPath, fileName);
 
-                                return new MoveItem
+                                    return new MoveItem
                                     {
                                         HistoryId     = t.HistoryId,
                                         FileId        = t.FileId,
@@ -87,165 +139,181 @@ namespace FileMoverWeb.Services
                                             ? $"TO-{t.ToStorageId.Value}"
                                             : $"TO-{t.FromStorageId}"   // 萬一 ToStorageId 是 null，就退回用 FromStorageId
                                     };
-                            }).ToList()
-                        };
+                                }).ToList()
+                            };
 
-                        _log.LogInformation("Start move batch {jobId} with {count} items", jobId, req.Items.Count);
+                            _log.LogInformation("Start SAME-FLOOR batch {jobId} with {count} items", jobId, req.Items.Count);
 
-                        var results = await mover.RunAsync(req, stoppingToken);
-                        foreach (var r in results)
-                        {
-                            if (r.Success)
+                            var results = await mover.RunAsync(req, stoppingToken);
+
+                            foreach (var r in results)
                             {
-                                await repo.CompleteAsync(r.HistoryId, stoppingToken);
-                                _log.LogInformation("[{hid}] Move success", r.HistoryId);
-                                 // 成功就清掉 retry 紀錄（保險）
-                                _moveRetryCounter.Remove(r.HistoryId);
-                            }
-                            else
-                            {
-                                // 先決定這次的錯誤碼（911/912/913/914...）
-                                var code = r.StatusCode.HasValue
-                                        ? r.StatusCode.Value
-                                        : MapMoveErrorCode(r.Error);
-
-                                // 讀取目前這個 HistoryId 已經失敗幾次
-                                _moveRetryCounter.TryGetValue(r.HistoryId, out var failCount);
-                                failCount++;
-                                _moveRetryCounter[r.HistoryId] = failCount;
-
-                                if (failCount >= MaxMoveAttempts)
+                                if (r.Success)
                                 {
-                                    // 第 3 次（或以上）失敗：正式寫入那個錯誤碼，之後不再 retry
-                                    await repo.FailAsync(r.HistoryId, code, r.Error, stoppingToken);
-                                    _log.LogWarning(
-                                        "[{hid}] Move failed ({code}) {fail}/{max}, give up and mark error.",
-                                        r.HistoryId, code, failCount, MaxMoveAttempts);
-
-                                    // 用完就把 counter 清掉，避免記憶體累積
+                                    await repo.CompleteAsync(r.HistoryId, stoppingToken);
+                                    _log.LogInformation("[{hid}] Move success", r.HistoryId);
                                     _moveRetryCounter.Remove(r.HistoryId);
                                 }
                                 else
                                 {
-                                    // 第 1、2 次失敗：只記錄 log，不呼叫 FailAsync，用 SQL 的 retryMin 再撿
-                                    _log.LogWarning(
-                                        "[{hid}] Move failed ({code}) {fail}/{max}, will retry later.",
-                                        r.HistoryId, code, failCount, MaxMoveAttempts);
+                                    // 先決定這次的錯誤碼（911/912/913/914...）
+                                    var code = r.StatusCode.HasValue
+                                            ? r.StatusCode.Value
+                                            : MapMoveErrorCode(r.Error);
 
-                                    // 不呼叫 FailAsync → DB 裡 file_status 仍然是 1
-                                    // SQL 的 ClaimAsync 會在 RetryMinutes 之後再撿這筆回來
-                                    //（如果你想順便記錯誤訊息到 DB，可以另外寫一個只更新 error_msg 的小 UPDATE，但你說先不要動 SQL，就先純程式控管）
+                                    // 讀取目前這個 HistoryId 已經失敗幾次
+                                    _moveRetryCounter.TryGetValue(r.HistoryId, out var failCount);
+                                    failCount++;
+                                    _moveRetryCounter[r.HistoryId] = failCount;
+
+                                    if (failCount >= MaxMoveAttempts)
+                                    {
+                                        // 第 3 次（或以上）失敗：正式寫入那個錯誤碼，之後不再 retry
+                                        await repo.FailAsync(r.HistoryId, code, r.Error, stoppingToken);
+                                        _log.LogWarning(
+                                            "[{hid}] Move failed ({code}) {fail}/{max}, give up and mark error.",
+                                            r.HistoryId, code, failCount, MaxMoveAttempts);
+
+                                        _moveRetryCounter.Remove(r.HistoryId);
+                                    }
+                                    else
+                                    {
+                                        // 第 1、2 次失敗：只記錄 log，不呼叫 FailAsync，用 SQL 的 retryMin 再撿
+                                        _log.LogWarning(
+                                            "[{hid}] Move failed ({code}) {fail}/{max}, will retry later.",
+                                            r.HistoryId, code, failCount, MaxMoveAttempts);
+                                    }
                                 }
                             }
-
                         }
 
+                        // =======================
+                        // A-2. 跨層任務：之後要做兩階段
+                        // =======================
+                        if (crossFloorTasks.Count > 0)
+                        {
+                            // 現在先不要亂搬，避免 4F server 直接去動 7F 的路徑。
+                            // 先 log 出來觀察，之後再改成：
+                            // Phase1: 搬到本層 RESTORE (restoreId)
+                            // Phase2: 由另一層 server 再撿 from=RESTORE 的任務繼續搬。
+                            _log.LogWarning(
+                                "There are {count} CROSS-FLOOR tasks (FromGroup != ToGroup). " +
+                                "目前尚未實作兩階段搬移，這些任務暫時停在 file_status=1。",
+                                crossFloorTasks.Count);
+
+                            foreach (var t in crossFloorTasks)
+                            {
+                                _log.LogWarning(
+                                    "[CROSS-FLOOR] HistoryId={hid}, FromStorage={fromId}({fromGroup}), ToStorage={toId}({toGroup})",
+                                    t.HistoryId, t.FromStorageId, t.FromGroup, t.ToStorageId, t.ToGroup);
+                            }
+
+                            // ※ 這裡暫時不對 crossFloorTasks 呼叫 mover.RunAsync，
+                            //    之後你要做 4F->RESTORE->(人工)->7F RESTORE->7F 的兩階段時，
+                            //    再來這裡改 Phase1 的建 req.
+                        }
                     }
 
-                // 2) 刪除任務（status = -1 → 1）
-           // 2) 刪除任務（status = -1 → 1）
-var deleteTasks = await repo.ClaimDeleteAsync(batch, retryMin, stoppingToken);
-Console.WriteLine($"[DEL-CLAIM]  {DateTime.Now:HH:mm:ss} claimed {deleteTasks.Count} tasks: " +
-    string.Join(",", deleteTasks.Select(t => t.HistoryId)));
+                    // 2) 刪除任務（status = -1 → 1）
+                    var deleteTasks = await repo.ClaimDeleteAsync(batch, retryMin, stoppingToken);
+                    Console.WriteLine($"[DEL-CLAIM]  {DateTime.Now:HH:mm:ss} claimed {deleteTasks.Count} tasks: " +
+                        string.Join(",", deleteTasks.Select(t => t.HistoryId)));
 
-if (deleteTasks.Count > 0)
-{
-    _log.LogInformation("Start delete batch with {count} items", deleteTasks.Count);
-
-    foreach (var t in deleteTasks)
-    {
-        // 先組檔名
-        var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
-            ? $"{t.UserBit}.MXF"
-            : t.FileName;
-
-        var src = Path.Combine(t.FromPath, fileName);
-
-        // ⭐ 每一筆刪除也當成一個 progress job（jobId = historyId）
-        var jobId = t.HistoryId.ToString();
-
-        try
-        {
-            // 先確認檔案是否存在
-            if (!File.Exists(src))
-            {
-                _log.LogWarning("[{hid}] Delete failed (921: not found): {path}", t.HistoryId, src);
-                await repo.FailDeleteAsync(t.HistoryId, 921, "File not found when deleting", stoppingToken);
-                _progress.CompleteJob(jobId);
-                continue;
-            }
-
-            long total = 0;
-            try
-            {
-                var fi = new FileInfo(src);
-                total = fi.Length;
-            }
-            catch (Exception exSize)
-            {
-                _log.LogWarning(exSize, "[{hid}] Get file size for delete failed: {path}", t.HistoryId, src);
-                total = 0; // 抓不到大小就當 0，不影響刪除本身
-            }
-
-            // 如果抓得到大小，就用「真實檔案大小」初始化進度
-            if (total > 0)
-            {
-                _progress.InitTotals(jobId, new Dictionary<string, long>
-                {
-                    [jobId] = total
-                });
-            }
-
-            // ⭐ 讀取檔案並回報進度（像 copy 一樣 read bytes）
-            long reported = 0;
-            byte[] buffer = new byte[1024 * 1024]; // 1MB buffer
-
-            if (total > 0)
-            {
-                using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
-                {
-                    int read;
-                    while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), stoppingToken)) > 0)
+                    if (deleteTasks.Count > 0)
                     {
-                        reported += read;
-                        _progress.AddCopied(jobId, jobId, read);   // destId = jobId = HistoryId
-                        await Task.Delay(10, stoppingToken);
+                        _log.LogInformation("Start delete batch with {count} items", deleteTasks.Count);
+
+                        foreach (var t in deleteTasks)
+                        {
+                            // 先組檔名
+                            var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
+                                ? $"{t.UserBit}.MXF"
+                                : t.FileName;
+
+                            var src   = Path.Combine(t.FromPath, fileName);
+                            var jobId = t.HistoryId.ToString();
+
+                            try
+                            {
+                                // 先確認檔案是否存在
+                                if (!File.Exists(src))
+                                {
+                                    _log.LogWarning("[{hid}] Delete failed (921: not found): {path}", t.HistoryId, src);
+                                    await repo.FailDeleteAsync(t.HistoryId, 921, "File not found when deleting", stoppingToken);
+                                    _progress.CompleteJob(jobId);
+                                    continue;
+                                }
+
+                                long total = 0;
+                                try
+                                {
+                                    var fi = new FileInfo(src);
+                                    total = fi.Length;
+                                }
+                                catch (Exception exSize)
+                                {
+                                    _log.LogWarning(exSize, "[{hid}] Get file size for delete failed: {path}", t.HistoryId, src);
+                                    total = 0; // 抓不到大小就當 0，不影響刪除本身
+                                }
+
+                                // 如果抓得到大小，就用「真實檔案大小」初始化進度
+                                if (total > 0)
+                                {
+                                    _progress.InitTotals(jobId, new Dictionary<string, long>
+                                    {
+                                        [jobId] = total
+                                    });
+                                }
+
+                                // ⭐ 讀取檔案並回報進度（像 copy 一樣 read bytes）
+                                long reported = 0;
+                                byte[] buffer = new byte[1024 * 1024]; // 1MB buffer
+
+                                if (total > 0)
+                                {
+                                    using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read))
+                                    {
+                                        int read;
+                                        while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), stoppingToken)) > 0)
+                                        {
+                                            reported += read;
+                                            _progress.AddCopied(jobId, jobId, read);   // destId = jobId = HistoryId
+                                            await Task.Delay(10, stoppingToken);
+                                        }
+                                    }
+
+                                    if (reported < total)
+                                    {
+                                        _progress.AddCopied(jobId, jobId, total - reported);
+                                    }
+                                }
+
+                                File.Delete(src);
+                                _log.LogInformation("[{hid}] Deleted file: {path}", t.HistoryId, src);
+
+                                _progress.CompleteJob(jobId);
+                                await repo.CompleteDeleteAsync(t.HistoryId, stoppingToken); // 12
+                            }
+                            catch (IOException ex)
+                            {
+                                _log.LogWarning(ex, "[{hid}] Delete failed (922: in use): {path}", t.HistoryId, src);
+                                await repo.FailDeleteAsync(t.HistoryId, 922, ex.Message, stoppingToken);
+                                _progress.CompleteJob(jobId);
+                            }
+                            catch (UnauthorizedAccessException ex)
+                            {
+                                _log.LogWarning(ex, "[{hid}] Delete failed (923: access denied): {path}", t.HistoryId, src);
+                                await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, stoppingToken);
+                                _progress.CompleteJob(jobId);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex, "[{hid}] Delete failed (923: other): {path}", t.HistoryId, src);
+                                await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, stoppingToken);
+                                _progress.CompleteJob(jobId);
+                            }
+                        }
                     }
-                }
-
-                if (reported < total)
-                {
-                    _progress.AddCopied(jobId, jobId, total - reported);
-                }
-            }
-
-            File.Delete(src);
-            _log.LogInformation("[{hid}] Deleted file: {path}", t.HistoryId, src);
-
-            _progress.CompleteJob(jobId);
-            await repo.CompleteDeleteAsync(t.HistoryId, stoppingToken); // 12
-        }
-        catch (IOException ex)
-        {
-            _log.LogWarning(ex, "[{hid}] Delete failed (922: in use): {path}", t.HistoryId, src);
-            await repo.FailDeleteAsync(t.HistoryId, 922, ex.Message, stoppingToken);
-            _progress.CompleteJob(jobId);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            _log.LogWarning(ex, "[{hid}] Delete failed (923: access denied): {path}", t.HistoryId, src);
-            await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, stoppingToken);
-            _progress.CompleteJob(jobId);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "[{hid}] Delete failed (923: other): {path}", t.HistoryId, src);
-            await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, stoppingToken);
-            _progress.CompleteJob(jobId);
-        }
-    }
-}
-
 
                     // 若本輪兩種任務都沒有，就睡一下
                     if (moveTasks.Count == 0 && deleteTasks.Count == 0)
@@ -282,7 +350,7 @@ if (deleteTasks.Count > 0)
             var msg = (error ?? string.Empty).ToLowerInvariant();
 
             // 911: 找不到來源 / 檔案不存在
-            if (msg.Contains("could not find file") || msg.Contains("does not exist") || msg.Contains("找不到")|| msg.Contains("source not found"))
+            if (msg.Contains("could not find file") || msg.Contains("does not exist") || msg.Contains("找不到") || msg.Contains("source not found"))
                 return 911;
 
             // 912: 檔案使用中 (sharing violation / being used by another process)
