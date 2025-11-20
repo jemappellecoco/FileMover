@@ -27,7 +27,7 @@ namespace FileMoverWeb.Services
         // ===== 調整參數（視環境可微調） =====
         private const int REPORT_INTERVAL_MS = 300;               // 至少每 300ms 回報一次
         private const long REPORT_BYTES_STEP = 4L * 1024 * 1024;  // 或每累積 ≥ 4 MB 回報
-        private const int MAX_PARALLEL_DEST = 3;                  // 同時最多幾個 DestId 併發
+        private const int MAX_PARALLEL_DEST = 4;                  // 同時最多幾個 DestId 併發
 
         private readonly SemaphoreSlim _destLimiter = new SemaphoreSlim(MAX_PARALLEL_DEST);
 
@@ -46,7 +46,7 @@ namespace FileMoverWeb.Services
             if (req.Items is null || req.Items.Count == 0) return new List<MoveResult>(0);
 
             // 新任務開始：清掉前一輪快照，避免 UI 還停在 100%
-            _progress.CompleteJob(req.JobId);
+            // _progress.CompleteJob(req.JobId);
 
             // 1) 預估總量（按 DestId 彙總），避免中途才知道總大小
             var totals = req.Items
@@ -70,6 +70,7 @@ namespace FileMoverWeb.Services
                 );
 
             _progress.InitTotals(req.JobId, totals);
+ 
 
             // 2) 依 DestId 分組處理（同一 Dest 串行，不同 Dest 受限度並行）
             var destGroups = req.Items
@@ -95,56 +96,119 @@ namespace FileMoverWeb.Services
 
             // 視需求決定是否在全部完成後清空快照：
             // _progress.CompleteJob(req.JobId);
-
+            // _progress.CompleteJob(req.JobId);
             return results.ToList();
         }
 
-        /// <summary>
-        /// 同一個 DestId 的檔案以「順序」搬運（降低同一顆磁碟的讀寫競爭）。
+       /// <summary>
+        /// 同一個 DestId 共用一個 progress job
         /// </summary>
-        private async Task MoveGroupAsync(
-            string jobId, string destId, List<MoveItem> items,
-            ConcurrentBag<MoveResult> results, CancellationToken ct)
+private async Task MoveGroupAsync(
+    string jobId, string destId, List<MoveItem> items,
+    ConcurrentBag<MoveResult> results, CancellationToken ct)
+{
+    foreach (var item in items)
+    {
+        ct.ThrowIfCancellationRequested();
+        Console.WriteLine($"[MOVE] job={jobId}, historyId={item.HistoryId}, src={item.SourcePath}");
+        try
         {
-            foreach (var item in items)
+            // 路徑拼不出來（多半是沒 FileData / 沒 UserBit） → 911
+            if (string.IsNullOrWhiteSpace(item.SourcePath))
             {
-                ct.ThrowIfCancellationRequested();
+                _logger.LogWarning(
+                    "[{Job}] Source path empty (HistoryId={HistoryId})，多半是缺 FileData/UserBit。",
+                    jobId, item.HistoryId);
 
-                try
+                results.Add(new MoveResult
                 {
-                    // ✅ 來源不存在就當作 pass（成功略過）
-                    if (!File.Exists(item.SourcePath))
-                    {
-                        _logger.LogWarning("[{Job}] Source not found, skip as pass: {Src}", jobId, item.SourcePath);
-                        results.Add(new MoveResult
-                        {
-                            HistoryId = item.HistoryId ?? 0,
-                            Success = true
-                        });
-                        continue;
-                    }
-
-                    var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
-                    await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct).ConfigureAwait(false);
-
-                    results.Add(new MoveResult
-                    {
-                        HistoryId = item.HistoryId ?? 0,
-                        Success = true
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "[{Job}] 搬運失敗：{Src}", jobId, item.SourcePath);
-                    results.Add(new MoveResult
-                    {
-                        HistoryId = item.HistoryId ?? 0,
-                        Success = false,
-                        Error = ex.Message
-                    });
-                }
+                    HistoryId  = item.HistoryId ?? 0,
+                    Success    = false,
+                    StatusCode = 911,
+                    Error      = "Source path empty (no FileData/UserBit)"
+                });
+                continue;
             }
+
+            // 911：來源不存在
+            if (!File.Exists(item.SourcePath))
+            {
+                _logger.LogWarning("[{Job}] Source not found: {Src}", jobId, item.SourcePath);
+                results.Add(new MoveResult
+                {
+                    HistoryId  = item.HistoryId ?? 0,
+                    Success    = false,
+                    StatusCode = 911,
+                    Error      = $"Source not found: {item.SourcePath}"
+                });
+                continue;
+            }
+
+            // 正常搬移流程
+            var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
+
+            // ⭐ 重點：這裡用「同一個 jobId (整批) + 同一個 destId (STO-x)」
+            //    不再用 HistoryId 當 jobId/destId
+            await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct).ConfigureAwait(false);
+
+            results.Add(new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = true,
+                StatusCode = 11,
+                Error      = null
+            });
         }
+        catch (IOException ex) when (IsSharingOrLockViolation(ex))   // 912
+        {
+            _logger.LogWarning(ex, "[{Job}] 檔案使用中（搬移失敗）：{Src}", jobId, item.SourcePath);
+            results.Add(new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 912,
+                Error      = ex.Message
+            });
+        }
+        catch (DirectoryNotFoundException ex)                       // 914
+        {
+            _logger.LogWarning(ex, "[{Job}] 目的地路徑不存在（搬移失敗）：{Src}", jobId, item.SourcePath);
+            results.Add(new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 914,
+                Error      = ex.Message
+            });
+        }
+        catch (UnauthorizedAccessException ex)                       // 913
+        {
+            _logger.LogWarning(ex, "[{Job}] 權限不足（搬移失敗）：{Src}", jobId, item.SourcePath);
+            results.Add(new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 913,
+                Error      = ex.Message
+            });
+        }
+        catch (Exception ex)                                        // 91
+        {
+            _logger.LogError(ex, "[{Job}] 搬運失敗：{Src}", jobId, item.SourcePath);
+            results.Add(new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 91,
+                Error      = ex.Message
+            });
+        }
+    }
+}
+
+
+
+
 
         /// <summary>
         /// 將單一檔案以暫存檔寫入 → 最後 Replace/Move 成目的檔（含進度回報、重試退避）。
@@ -168,22 +232,32 @@ namespace FileMoverWeb.Services
             try
             {
                 using var inFs = new FileStream(
-                    srcPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: 1024 * 1024,
-                    useAsync: true);
+                srcPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                useAsync: true);
 
-                srcSize = inFs.Length;         // ★ 讀取來源檔大小
+            srcSize = inFs.Length;         // ★ 讀取來源檔大小
 
-                using var outFs = new FileStream(
-                    tmpPath,
-                    FileMode.Create,
-                    FileAccess.Write,
-                    FileShare.Read,                 // 允許掃描器讀
-                    bufferSize: 1024 * 1024,
-                    useAsync: true);
+            // ⭐ 這裡把「這個 HistoryId 的 Job」初始化 total bytes
+            // jobId = 呼叫者傳進來的 progId（HistoryId 字串）
+            // destId = 也是 progId（前端就可以用 historyId 當 data-to）
+            // _progress.InitTotals(jobId, new Dictionary<string, long>
+            // {
+            //     [destId] = srcSize
+            // });
+
+            using var outFs = new FileStream(
+                tmpPath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                useAsync: true);
+
+
 
                 var buffer = new byte[1024 * 1024];
                 int read;
@@ -232,20 +306,20 @@ namespace FileMoverWeb.Services
             }
             catch { /* 忽略清理失敗 */ }
 
-            // ★ 搬完後刪除來源：先核對目的檔大小一致再刪
-            try
-            {
-                var dstInfo = new FileInfo(dstPath);
-                if (dstInfo.Exists && dstInfo.Length == srcSize)
-                {
-                    File.Delete(srcPath);      // ✅ 確認成功才刪來源
-                }
-                // 若大小不一致就保留來源，交由重試/人工處理
-            }
-            catch
-            {
-                // 刪除來源失敗不影響搬運成果（例如權限/鎖定），安全忽略或之後再處理
-            }
+            // // ★ 搬完後刪除來源：先核對目的檔大小一致再刪
+            // try
+            // {
+            //     var dstInfo = new FileInfo(dstPath);
+            //     if (dstInfo.Exists && dstInfo.Length == srcSize)
+            //     {
+            //         File.Delete(srcPath);      // ✅ 確認成功才刪來源
+            //     }
+            //     // 若大小不一致就保留來源，交由重試/人工處理
+            // }
+            // catch
+            // {
+            //     // 刪除來源失敗不影響搬運成果（例如權限/鎖定），安全忽略或之後再處理
+            // }
         }
 
 

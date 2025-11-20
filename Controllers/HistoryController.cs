@@ -32,17 +32,41 @@ namespace FileMoverWeb.Controllers
             {
                 r.HistoryId,
                 r.FileId,
+
+                // 檔名相關
                 ProgramName = r.FileName ?? r.UserBit ?? string.Empty,
                 FileName    = r.UserBit  ?? r.FileName ?? string.Empty,
-                SourcePath  = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
-                                ? Path.Combine(r.FromPath!, $"{r.UserBit}.mxf") : null,
-                DestPath    = (!string.IsNullOrWhiteSpace(r.ToPath) && !string.IsNullOrWhiteSpace(r.UserBit))
-                                ? Path.Combine(r.ToPath!, $"{r.UserBit}.mxf") : null,
+
+                // ✅ 用 Storage.storage_name 當來源 / 目的地顯示
+                SourceStorage = r.FromName,   // 例如：7F L2、4F Temp
+                DestStorage   = r.ToName,     // 例如：IC1、watch_4F
+
+                // 如需完整路徑（含檔名）給 CSV / tooltip 可保留
+                SourcePath = (!string.IsNullOrWhiteSpace(r.FromPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                               ? Path.Combine(r.FromPath!, $"{r.UserBit}.mxf")
+                               : null,
+                DestPath   = (!string.IsNullOrWhiteSpace(r.ToPath) && !string.IsNullOrWhiteSpace(r.UserBit))
+                               ? Path.Combine(r.ToPath!, $"{r.UserBit}.mxf")
+                               : null,
                 r.FromStorageId,
                 r.ToStorageId,
                 r.UpdateTime,
                 Status = r.Status,
-                StatusText = r.Status == 11 ? "成功" : "失敗"
+                StatusText = r.Status switch
+                {
+                    11  => "搬移成功",
+                    12  => "刪除成功",
+                    91  => "搬移失敗（其他）",
+                    92  => "刪除失敗（其他）",
+                    911 => "搬移失敗－找不到來源/檔案不存在",
+                    912 => "搬移失敗－檔案使用中",
+                    913 => "搬移失敗－權限不足",
+                    914 => "搬移失敗－找不到目的地",
+                    921 => "刪除失敗－找不到來源/檔案不存在",
+                    922 => "刪除失敗－檔案使用中",
+                    923 => "刪除失敗－權限不足",
+                    _   => r.Status.ToString()
+                }
             });
 
             return Ok(data);

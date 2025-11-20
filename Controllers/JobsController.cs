@@ -94,18 +94,6 @@ public class JobsController : ControllerBase
             r.ToStorageId,
             r.UpdateTime,
 
-            Status = r.Status,
-            // ★ 新增 12/92 的顯示文字
-            StatusText = r.Status switch
-            {
-                12 => "刪除成功",
-                92 => "刪除失敗",
-                11 => "成功",
-                91 => "失敗",
-                1  => "進行中",
-                0  => "待處理",
-                _  => r.Status.ToString()
-            },
 
             r.Error
         });

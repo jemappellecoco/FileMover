@@ -80,16 +80,20 @@
     const $count = document.getElementById('pendingCount');
     const $status = document.getElementById('statusLine');
 
-    // 進度工具：設定 %（0~100）
-    function setProgressForDest(destId, percent) {
-      const p = Math.max(0, Math.min(100, Math.round(percent || 0)));
-      document.querySelectorAll(`.progress-wrap[data-to="${destId}"]`).forEach(wrap => {
+    // 進度工具：依 historyId 設定 %（0~100）
+// 進度工具：依 historyId / destId 設定 %（0~100）
+  function setProgressForHistory(id, percent) {
+    const key = String(id);
+    const p = Math.max(0, Math.min(100, Math.round(percent || 0)));
+
+    document.querySelectorAll(`.progress-wrap[data-progress-key="${key}"]`)
+      .forEach(wrap => {
         const bar = wrap.querySelector('.progress > div');
         const txt = wrap.querySelector('.progress-text');
         if (bar) bar.style.width = p + '%';
         if (txt) txt.textContent = p + '%';
       });
-    }
+  }
 
     async function loadPending() {
       $btnReload.disabled = true;
@@ -111,26 +115,38 @@
 
         const frag = document.createDocumentFragment();
         rows.forEach(r => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td>${r.historyId}</td>
-            <td>${r.fileId}</td>
-            <td>${r.programName || ''}</td>
-            <td>${r.fileName || ''}</td>
-            <td class="mono path">${r.sourcePath ? r.sourcePath.replaceAll('\\\\', '\\') : ''}</td>
-            <td class="mono path">${r.destPath ? r.destPath.replaceAll('\\\\', '\\') : ''}</td>
-            <td>${r.fromStorageId}</td>
-            <td>${r.toStorageId}</td>
-            <td>
-              <!-- <div class="progress-wrap" data-to="${r.toStorageId}"> -->
-                <div class="progress-wrap" data-to="${r.historyId}">
-                <div class="progress"><div style="width:0%"></div></div>
-                <div class="progress-text">0%</div>
-              </div>
-            </td>
-          `;
-          frag.appendChild(tr);
-        });
+  const kind = (r.taskKind || '').toLowerCase();  // "move" or "delete"
+  let progressKey;
+
+  if (kind === 'delete') {
+    // 刪除：用 HistoryId 當 key，對應後端 jobId / destId = HistoryId.ToString()
+    progressKey = String(r.historyId);
+  } else {
+    // 搬移：用 TO-StorageId，對應後端 DestId = "TO-<id>"
+    progressKey = (r.toStorageId != null && r.toStorageId !== undefined)
+      ? `TO-${r.toStorageId}`
+      : `TO-${r.fromStorageId}`;
+  }
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${r.historyId}</td>
+    <td>${r.fileId}</td>
+    <td>${r.programName || ''}</td>
+    <td>${r.fileName || ''}</td>
+    <td class="mono path">${r.sourcePath ? r.sourcePath.replaceAll('\\\\', '\\') : ''}</td>
+    <td class="mono path">${r.destPath ? r.destPath.replaceAll('\\\\', '\\') : ''}</td>
+    <td>${r.fromStorageId}</td>
+    <td>${r.toStorageId}</td>
+    <td>
+      <div class="progress-wrap" data-progress-key="${progressKey}">
+        <div class="progress"><div style="width:0%"></div></div>
+        <div class="progress-text">0%</div>
+      </div>
+    </td>
+  `;
+  frag.appendChild(tr);
+});
 
         $tableBody.appendChild(frag);
         $count.textContent = rows.length + ' 筆';
@@ -145,24 +161,28 @@
 
     // 即時監聽全部工作的進度（依 DestId 更新）
 
-function startProgressListener() {
+    function startProgressListener() {
   let es;
 
   function connect() {
     es = new EventSource('/api/progress/events');
     $status.textContent = '（已連線進度事件）';
 
-    // ✅ 關鍵：監聽具名事件 'progress'
     es.addEventListener('progress', (e) => {
       try {
-        const jobs = JSON.parse(e.data);              // [{ jobId, total, copied, percent, targets:[{destId,copied,total,percent}]}]
-        // console.debug('SSE progress:', jobs);      // ← 想看 payload 可暫時開這行
+        const jobs = JSON.parse(e.data);
         if (!Array.isArray(jobs)) return;
 
         for (const job of jobs) {
           if (!Array.isArray(job.targets)) continue;
+
           for (const t of job.targets) {
-            setProgressForDest(t.destId, t.percent);   // 以 destId 對應 .progress-wrap[data-to="..."]
+            // ★ IJobProgress 裡的是 destId，不是 historyId
+            //   我們後端有把 destId 設成 $"{HistoryId}"，
+            //   所以前端直接拿 destId 當 key，就能對到 data-history-id。
+            if (t.destId != null) {
+              setProgressForHistory(t.destId, t.percent);
+            }
           }
         }
       } catch (err) {
@@ -170,8 +190,9 @@ function startProgressListener() {
       }
     });
 
-    // 可留著：如果未來有「無事件名」的訊息才會進來
-    es.onmessage = () => {};
+    es.onopen = () => {
+      $status.textContent = '（已連線進度事件）';
+    };
 
     es.onerror = () => {
       $status.textContent = '（進度事件斷線，重試中…）';
@@ -182,6 +203,8 @@ function startProgressListener() {
 
   connect();
 }
+
+
 $btnReload.addEventListener('click', loadPending);
 loadPending();
 startProgressListener();

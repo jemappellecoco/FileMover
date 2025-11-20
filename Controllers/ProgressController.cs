@@ -80,7 +80,7 @@ public sealed class ProgressController : ControllerBase
         while (!ct.IsCancellationRequested)
         {
             var payload = JsonSerializer.Serialize(BuildAllJobs());
-
+            // Console.WriteLine("[SSE] payload = " + payload);
             await Response.WriteAsync("event: progress\n", ct);
             await Response.WriteAsync($"data: {payload}\n\n", ct);
             // await Response.WriteAsync($"data: {payload}\n\n", ct); // 不要 event: progress

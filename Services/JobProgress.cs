@@ -2,7 +2,7 @@
 using System.Collections.Concurrent;
 using System.Linq;
 using FileMoverWeb.Models;
-
+using System.Collections.Generic;
 namespace FileMoverWeb.Services
 {
     public interface IJobProgress
@@ -29,8 +29,9 @@ namespace FileMoverWeb.Services
                     (_, exist) => { exist.TotalBytes = kv.Value; return exist; }
                 );
             }
+            //  Console.WriteLine($"[Progress] InitTotals job={jobId}, dests={string.Join(",", totalsByDest.Select(k => $"{k.Key}:{k.Value}"))}");
         }
-
+        
         // 回報「增量 bytes」
         public void AddCopied(string jobId, string destId, long deltaBytes)
         {
@@ -48,6 +49,7 @@ namespace FileMoverWeb.Services
                     return exist;
                 }
             );
+            // Console.WriteLine($"[Progress] AddCopied job={jobId}, dest={destId}, +{deltaBytes} bytes");
         }
 
 

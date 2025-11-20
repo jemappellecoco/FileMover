@@ -8,5 +8,8 @@ namespace FileMoverWeb.Models
         public int ToStorageId { get; set; }   // (可選)
         public bool Success { get; set; }
         public string? Error { get; set; }
+        
+        // ★ 新增：要寫回 DB 的 file_status（例如 911 / 912 / 91）
+        public int? StatusCode { get; set; } 
     }
 }

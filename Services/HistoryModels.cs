@@ -7,7 +7,7 @@ namespace FileMoverWeb.Services
         public int FileId { get; set; }
         public string? FileName { get; set; }
         public string? UserBit { get; set; }
-        public string? ChannelName { get; set; }
+       
 
         public int FromStorageId { get; set; }
         public string? FromName { get; set; }
