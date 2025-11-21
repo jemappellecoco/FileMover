@@ -59,11 +59,14 @@ namespace FileMoverWeb.Services
 
             // ★ 先從 DB 找到本樓層的 RESTORE StorageId（之後跨層兩階段會用）
             int restoreId;
+            string restorePath;
             using (var scope = _sp.CreateScope())
             {
                 var repo = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
                 restoreId = await repo.GetRestoreStorageIdAsync(group, stoppingToken);
+                restorePath = await repo.GetStorageLocationAsync(restoreId, stoppingToken);
             }
+            
 
             _log.LogInformation(
                 "HistoryWatchService started for group {group}, RESTORE = {restoreId}",
@@ -152,6 +155,8 @@ namespace FileMoverWeb.Services
                                 {
                                     await repo.CompleteAsync(r.HistoryId, stoppingToken);
                                     _log.LogInformation("[{hid}] Move success", r.HistoryId);
+
+                                    // 成功就清掉 retry 紀錄（保險）
                                     _moveRetryCounter.Remove(r.HistoryId);
                                 }
                                 else
@@ -174,6 +179,7 @@ namespace FileMoverWeb.Services
                                             "[{hid}] Move failed ({code}) {fail}/{max}, give up and mark error.",
                                             r.HistoryId, code, failCount, MaxMoveAttempts);
 
+                                        // 用完就把 counter 清掉，避免記憶體累積
                                         _moveRetryCounter.Remove(r.HistoryId);
                                     }
                                     else
@@ -182,37 +188,118 @@ namespace FileMoverWeb.Services
                                         _log.LogWarning(
                                             "[{hid}] Move failed ({code}) {fail}/{max}, will retry later.",
                                             r.HistoryId, code, failCount, MaxMoveAttempts);
+
+                                        // 不呼叫 FailAsync → DB 裡 file_status 仍然是 1
+                                        // ClaimAsync 會在 retryMinutes 之後再把這筆撿回來重跑
                                     }
                                 }
                             }
+
+
                         }
 
                         // =======================
-                        // A-2. 跨層任務：之後要做兩階段
-                        // =======================
+                    // A-2. 跨層任務：Phase 1 先搬到本層 RESTORE
+                    // =======================
                         if (crossFloorTasks.Count > 0)
                         {
-                            // 現在先不要亂搬，避免 4F server 直接去動 7F 的路徑。
-                            // 先 log 出來觀察，之後再改成：
-                            // Phase1: 搬到本層 RESTORE (restoreId)
-                            // Phase2: 由另一層 server 再撿 from=RESTORE 的任務繼續搬。
-                            _log.LogWarning(
-                                "There are {count} CROSS-FLOOR tasks (FromGroup != ToGroup). " +
-                                "目前尚未實作兩階段搬移，這些任務暫時停在 file_status=1。",
-                                crossFloorTasks.Count);
+                            _log.LogInformation(
+                                "Start CROSS-FLOOR Phase1 batch: {count} items -> RESTORE({restoreId})",
+                                crossFloorTasks.Count, restoreId);
 
-                            foreach (var t in crossFloorTasks)
+                            // 讓所有跨層任務共用同一個 RESTORE 進度條
+                            var crossJobId = Guid.NewGuid().ToString("N");
+
+                            var crossReq = new MoveBatchRequest
                             {
-                                _log.LogWarning(
-                                    "[CROSS-FLOOR] HistoryId={hid}, FromStorage={fromId}({fromGroup}), ToStorage={toId}({toGroup})",
-                                    t.HistoryId, t.FromStorageId, t.FromGroup, t.ToStorageId, t.ToGroup);
-                            }
+                                JobId = crossJobId,
+                                Items = crossFloorTasks.Select(t =>
+                                {
+                                    var fileName = !string.IsNullOrWhiteSpace(t.UserBit)
+                                        ? $"{t.UserBit}.MXF"
+                                        : t.FileName;
 
-                            // ※ 這裡暫時不對 crossFloorTasks 呼叫 mover.RunAsync，
-                            //    之後你要做 4F->RESTORE->(人工)->7F RESTORE->7F 的兩階段時，
-                            //    再來這裡改 Phase1 的建 req.
+                                    var src = Path.Combine(t.FromPath, fileName);
+                                    // ⭐ Phase1：目的地改成「本層 RESTORE 路徑」
+                                    var dst = Path.Combine(restorePath, fileName);
+
+                                    return new MoveItem
+                                    {
+                                        HistoryId     = t.HistoryId,
+                                        FileId        = t.FileId,
+                                        FromStorageId = t.FromStorageId,
+                                        ToStorageId   = restoreId,  // 先寫成 RESTORE
+                                        SourcePath    = src,
+                                        DestPath      = dst,
+
+                                        // RESTORE 共用一條進度
+                                        DestId = $"RESTORE-{restoreId}"
+                                    };
+                                }).ToList()
+                            };
+
+                            var crossResults = await mover.RunAsync(crossReq, stoppingToken);
+
+                            foreach (var r in crossResults)
+                            {
+                                // 找出對應的 task（為了拿 FromGroup / ToGroup）
+                                var t = crossFloorTasks.FirstOrDefault(x => x.HistoryId == r.HistoryId);
+                                if (t == null)
+                                {
+                                    _log.LogWarning("[CROSS-FLOOR] result HistoryId={hid} 找不到對應 task", r.HistoryId);
+                                    continue;
+                                }
+                                if (r.Success)
+                                    {
+                                        // 決定 14/17
+                                        var statusCode = string.Equals(group, "4F", StringComparison.OrdinalIgnoreCase)
+                                            ? 14
+                                            : 17;
+
+                                        // Phase1：更新 file_status 但不動 storage_id
+                                        await repo.MarkPhase1DoneAsync(
+                                            r.HistoryId,
+                                            statusCode,
+                                            stoppingToken);
+
+                                        _log.LogInformation(
+                                            "[{hid}] CROSS-FLOOR Phase1 success: From {fromGroup} -> RESTORE({restoreId}), status={status}",
+                                            r.HistoryId, t.FromGroup, restoreId, statusCode);
+
+                                        _moveRetryCounter.Remove(r.HistoryId);
+                                    }
+
+                                else
+                                {
+                                    // 失敗照原本 retry 規則
+                                    var code = r.StatusCode.HasValue
+                                            ? r.StatusCode.Value
+                                            : MapMoveErrorCode(r.Error);
+
+                                    _moveRetryCounter.TryGetValue(r.HistoryId, out var failCount);
+                                    failCount++;
+                                    _moveRetryCounter[r.HistoryId] = failCount;
+
+                                    if (failCount >= MaxMoveAttempts)
+                                    {
+                                        await repo.FailAsync(r.HistoryId, code, r.Error, stoppingToken);
+                                        _log.LogWarning(
+                                            "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, give up and mark error.",
+                                            r.HistoryId, code, failCount, MaxMoveAttempts);
+
+                                        _moveRetryCounter.Remove(r.HistoryId);
+                                    }
+                                    else
+                                    {
+                                        _log.LogWarning(
+                                            "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, will retry later.",
+                                            r.HistoryId, code, failCount, MaxMoveAttempts);
+                                    }
+                                    }
+                                }
                         }
                     }
+
 
                     // 2) 刪除任務（status = -1 → 1）
                     var deleteTasks = await repo.ClaimDeleteAsync(batch, retryMin, stoppingToken);

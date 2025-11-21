@@ -9,7 +9,7 @@ using System.Data.Common;
 using System.IO;                 // for Path.Combine
 using Dapper;
 using Microsoft.Extensions.Configuration;
-using FileMoverWeb.Services;
+
 namespace FileMoverWeb.Services
 {
     #region DTOs
@@ -367,6 +367,7 @@ WHERE id = @historyId;";
 
 
 
+
 public async Task<int> GetRestoreStorageIdAsync(string group, CancellationToken ct)
 {
     using var conn = _factory.Create();
@@ -387,5 +388,52 @@ WHERE set_group = @g
 
     return ids[0];
 }
-    }
+
+/// <summary>
+/// 取得某個 Storage 的實際路徑 (location)
+/// </summary>
+public async Task<string> GetStorageLocationAsync(int storageId, CancellationToken ct)
+{
+    using var conn = _factory.Create();
+
+    var path = await conn.ExecuteScalarAsync<string>(
+        new CommandDefinition(@"
+SELECT location 
+FROM dbo.Storage
+WHERE id = @id;",
+            new { id = storageId }, cancellationToken: ct));
+
+    if (string.IsNullOrWhiteSpace(path))
+        throw new InvalidOperationException($"找不到 StorageId={storageId} 的路徑 (location)");
+
+    return path;
+}
+
+/// <summary>
+/// 跨樓層搬運：階段一完成（已搬到本樓層 RESTORE）
+/// ✅ 只更新 file_status = 14 / 17，不動 from_storage_id / to_storage_id
+/// </summary>
+public async Task MarkPhase1DoneAsync(
+    int historyId,
+    int statusCode,            // 14 或 17
+    CancellationToken ct)
+{
+    using var conn = _factory.Create();
+
+    const string sql = @"
+UPDATE dbo.FileData_History
+SET file_status = @statusCode,
+    update_time = GETDATE()
+WHERE id = @historyId;";
+
+    await conn.ExecuteAsync(
+        new CommandDefinition(
+            sql,
+            new { historyId, statusCode },
+            cancellationToken: ct));
+}
+    
+}
+
+
 }
