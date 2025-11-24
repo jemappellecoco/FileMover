@@ -148,7 +148,8 @@ private async Task MoveGroupAsync(
             var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
 
             // ⭐ 重點：這裡用「同一個 jobId (整批) + 同一個 destId (STO-x)」
-            //    不再用 HistoryId 當 jobId/destId
+            //    不再用 HistoryId 當 jobId/destId.
+            _progress.SetCurrentFile(jobId, destId, Path.GetFileName(item.SourcePath) ?? item.SourcePath);
             await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct).ConfigureAwait(false);
 
             results.Add(new MoveResult

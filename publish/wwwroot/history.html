@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>搬運歷史紀錄</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial;
+      margin: 32px;
+      background: #fafafa;
+    }
+    h1 { font-size: 22px; margin-bottom: 12px; }
+    .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    button {
+      padding: 8px 14px; border: 0; border-radius: 8px;
+      background: #111827; color: #fff; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: default; }
+    select, input[type="number"], input[type="text"] {
+      padding: 8px 10px; border-radius: 8px; border:1px solid #d1d5db; background:#fff;
+    }
+    .muted { color: #6b7280; margin-left: 8px; }
+    table {
+      width: 100%; border-collapse: collapse; margin-top: 16px; background: #fff;
+      table-layout: fixed; word-break: break-all;
+    }
+    th, td {
+      padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; text-align: left; vertical-align: top;
+    }
+    th { background: #f9fafb; position: sticky; top: 0; z-index: 1; }
+    tr:hover td { background: #f3f4f6; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+    .status-pill {
+      display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700;
+    }
+    .ok { background:#e6f6ec; color:#146c2e; border:1px solid #b9ebcd; }
+    .fail { background:#fdecec; color:#b42318; border:1px solid #f7c6c5; }
+  </style>
+</head>
+
+<body>
+  <h1>🗂️ 搬運歷史紀錄</h1>
+
+  <div class="toolbar">
+    <label>狀態：
+      <select id="selStatus">
+        <option value="all">全部</option>
+
+        <optgroup label="搬移 Move">
+          <option value="11">搬移成功 (11)</option>
+          <option value="911">搬移失敗－找不到來源 (911)</option>
+          <option value="912">搬移失敗－檔案使用中 (912)</option>
+          <option value="913">搬移失敗－權限不足 (913)</option>
+          <option value="914">搬移失敗－找不到目的地 (914)</option>
+          <option value="91">搬移失敗－其他 (91)</option>
+        </optgroup>
+
+        <optgroup label="刪除 Delete">
+          <option value="12">刪除成功 (12)</option>
+          <option value="921">刪除失敗－找不到來源 (921)</option>
+          <option value="922">刪除失敗－檔案使用中 (922)</option>
+          <option value="923">刪除失敗－權限不足 (923)</option>
+          <option value="92">刪除失敗－其他 (92)</option>
+        </optgroup>
+      </select>
+    </label>
+
+    <label>顯示筆數：
+      <input id="inpTake" type="number" min="10" step="10" value="200" style="width:100px;">
+    </label>
+
+    <label>搜尋檔名(UserBit)：
+      <input id="inpSearch" type="text" placeholder="輸入關鍵字，例如 2101EC3F" style="width:220px;">
+    </label>
+
+    <button id="btnReload">重新整理</button>
+    <button id="btnExport">匯出 CSV</button>
+    <span id="rowCount" class="muted"></span>
+  </div>
+
+  <table id="histTable">
+    <thead>
+      <tr>
+        <th style="width:70px;">#</th>
+        <th style="width:180px;">節目名稱</th>
+        <th style="width:220px;">檔名(UserBit)</th>
+        <th style="width:150px;">來源 Storage</th>
+        <th style="width:150px;">目的 Storage</th>
+        <th style="width:170px;">UpdateTime</th>
+        <th style="width:100px;">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>
+    </tbody>
+  </table>
+
+<script>
+  // === API 路徑 ===
+  const API_HISTORY = '/history';
+
+  const $selStatus = document.getElementById('selStatus');
+  const $inpTake   = document.getElementById('inpTake');
+  const $inpSearch = document.getElementById('inpSearch');
+  const $btnReload = document.getElementById('btnReload');
+  const $btnExport = document.getElementById('btnExport');
+  const $tbody     = document.querySelector('#histTable tbody');
+  const $count     = document.getElementById('rowCount');
+
+  let allRows = [];
+  let currentRows = [];
+
+  function fmtDate(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d)) return s;
+    return d.toLocaleString();
+  }
+
+  // === 渲染表格（用流水號＋StorageName） ===
+  function render(rows) {
+    const frag = document.createDocumentFragment();
+    rows.forEach((r, idx) => {
+      const tr = document.createElement('tr');
+      const label = statusLabelFromCode(r.status);
+
+      tr.innerHTML = `
+        <td>${idx + 1}</td>
+        <td>${r.programName || ''}</td>
+        <td>${r.fileName || ''}</td>
+        <td>${r.sourceStorage || ''}</td>
+        <td>${r.destStorage || ''}</td>
+        <td>${fmtDate(r.updateTime)}</td>
+        <td>${pillByLabel(label)}</td>
+      `;
+      frag.appendChild(tr);
+    });
+    $tbody.innerHTML = '';
+    $tbody.appendChild(frag);
+    $count.textContent = rows.length + ' 筆';
+    currentRows = rows;
+  }
+
+  // === 狀態碼 → 中文標籤 ===
+  function statusLabelFromCode(code) {
+    const n = Number(code);
+
+    if (n === 11) return '搬移成功';
+    if (n === 12) return '刪除成功';
+
+    if (n === 91)  return '搬移失敗（其他）';
+
+    if (n === 911) return '搬移失敗－找不到來源/檔案不存在';
+    if (n === 912) return '搬移失敗－檔案使用中';
+    if (n === 913) return '搬移失敗－權限不足';
+    if (n === 914) return '搬移失敗－找不到目的地';
+
+    if (n === 92)  return '刪除失敗（其他）';
+
+    if (n === 921) return '刪除失敗－找不到來源/檔案不存在';
+    if (n === 922) return '刪除失敗－檔案使用中';
+    if (n === 923) return '刪除失敗－權限不足';
+
+    if (n === 1)  return '進行中';
+    if (n === 0)  return '待處理';
+
+    return String(code ?? '');
+  }
+
+  // === 依標籤決定膠囊顏色（沿用你原本的成功/失敗樣式） ===
+  function pillByLabel(label) {
+    if (!label) return `<span class="status-pill">-</span>`;
+
+    if (label.includes('成功'))
+      return `<span class="status-pill ok">${label}</span>`;
+
+    if (label.includes('失敗'))
+      return `<span class="status-pill fail">${label}</span>`;
+
+    return `<span class="status-pill">${label}</span>`;
+  }
+
+  // === 狀態 + 檔名搜尋一起過濾 ===
+  function filterAndRender() {
+    const st = $selStatus.value || 'all';
+    const kw = ($inpSearch.value || '').trim().toLowerCase();
+
+    let rows = allRows;
+
+    // 狀態碼篩選
+    if (st !== 'all') {
+      const want = Number(st);
+      rows = rows.filter(r => Number(r.status) === want);
+    }
+
+    // 檔名(UserBit) 關鍵字搜尋
+    if (kw) {
+      rows = rows.filter(r => {
+        const name = (r.fileName || '').toLowerCase();
+        return name.includes(kw);
+      });
+    }
+
+    render(rows);
+  }
+
+  // === 從後端載入資料 ===
+  async function loadHistory() {
+    $btnReload.disabled = true;
+    $btnReload.textContent = '載入中…';
+    $count.textContent = '';
+    $tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>`;
+
+    const take = Math.max(1, parseInt($inpTake.value || '200', 10));
+
+    try {
+      const url = `${API_HISTORY}?status=all&take=${take}&ts=${Date.now()}`;
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const rows = await resp.json();
+      allRows = Array.isArray(rows) ? rows : [];
+
+      if (allRows.length === 0) {
+        $tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
+        $count.textContent = '0 筆';
+        return;
+      }
+      filterAndRender();
+    } catch (err) {
+      console.error(err);
+      $tbody.innerHTML = `<tr><td colspan="7" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+    } finally {
+      $btnReload.disabled = false;
+      $btnReload.textContent = '重新整理';
+    }
+  }
+
+  // === 匯出 CSV（跟畫面欄位對齊） ===
+  function exportCSV() {
+    if (!currentRows || currentRows.length === 0) return;
+
+    const header = [
+      '#','ProgramName','FileName',
+      'SourceStorage','DestStorage',
+      'UpdateTime','Status'
+    ];
+    const lines = [header.join(',')];
+
+    currentRows.forEach((r, idx) => {
+      const label = statusLabelFromCode(r.status);
+
+      const row = [
+        idx + 1,
+        safeCSV(r.programName),
+        safeCSV(r.fileName),
+        safeCSV(r.sourceStorage),
+        safeCSV(r.destStorage),
+        fmtDate(r.updateTime),
+        safeCSV(label)
+      ];
+      lines.push(row.join(','));
+    });
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `history_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    function safeCSV(s) {
+      if (s == null) return '';
+      const t = String(s).replaceAll('"', '""');
+      return /[",\n]/.test(t) ? `"${t}"` : t;
+    }
+  }
+
+  // === 綁定事件 ===
+  $btnReload.addEventListener('click', loadHistory);
+  $btnExport.addEventListener('click', exportCSV);
+  $selStatus.addEventListener('change', filterAndRender);
+  $inpTake.addEventListener('change', loadHistory);
+  $inpSearch.addEventListener('input', filterAndRender);
+
+  // === 初次載入 ===
+  loadHistory();
+</script>
+
+</body>
+</html>

@@ -7,8 +7,6 @@ C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.csproj.CoreCompileInput
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.MvcApplicationPartsAssemblyInfo.cs
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.MvcApplicationPartsAssemblyInfo.cache
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.sourcelink.json
-C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\appsettings.Development.json
-C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\appsettings.json
 C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\FileMoverWeb.staticwebassets.runtime.json
 C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\FileMoverWeb.staticwebassets.endpoints.json
 C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\FileMoverWeb.exe
@@ -95,4 +93,10 @@ C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.pdb
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\FileMoverWeb.genruntimeconfig.cache
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\ref\FileMoverWeb.dll
 C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\e3q058aa4g-nr9kn4uusn.gz
-C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\s2ojdjha5j-kh3qgm51c9.gz
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\appsettings.json
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\publish\web.config
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\publish\appsettings.json
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\publish\FileMoverWeb.deps.json
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\publish\FileMoverWeb.runtimeconfig.json
+C:\Users\coco\FileMoverWeb\bin\Debug\net9.0\publish\FileMoverWeb.staticwebassets.endpoints.json
+C:\Users\coco\FileMoverWeb\obj\Debug\net9.0\compressed\s2ojdjha5j-7ktw2rohr5.gz

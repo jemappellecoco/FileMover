@@ -54,12 +54,14 @@ public class JobsController : ControllerBase
                 FileName    = x.UserBit ?? x.FileName,
 
                 // 直接用 HistoryTask 的唯讀屬性（已自動組 .MXF）
-                SourcePath  = x.FullSourcePath,
-                DestPath    = x.FullDestPath,
-
+                // SourcePath  = x.FullSourcePath,
+                // DestPath    = x.FullDestPath,
+                SourceStorage = x.FromName,
+                DestStorage   = x.ToName,
                 // 新增：任務類型給前端顯示/過濾用
                 TaskKind    = kind,                // "move" 或 "delete"
-                RequestedBy = x.RequestedBy ?? "-" // 誰發的
+                RequestedBy = x.RequestedBy ?? "-", // 誰發的
+                 SourceGroup = x.FromGroup
             };
         });
 

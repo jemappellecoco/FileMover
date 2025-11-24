@@ -50,7 +50,8 @@ public sealed class ProgressController : ControllerBase
                     total   = t.TotalBytes,
                     percent = t.TotalBytes > 0
                         ? Math.Min(100, Math.Max(0, (int)(t.CopiedBytes * 100L / t.TotalBytes)))
-                        : 0
+                        : 0,
+                        currentFile = t.CurrentFile
                 })
             });
         }

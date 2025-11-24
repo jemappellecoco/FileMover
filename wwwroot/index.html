@@ -38,7 +38,16 @@
     .progress-text {
       font-size: 12px; color: #6b7280; margin-top: 4px; text-align: right;
     }
-
+    .progress-file {
+      font-size: 12px;
+      color: #374151;
+      margin-top: 2px;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 210px;
+    }
     /* 小小的狀態列 */
     #statusLine { margin-left: 12px; font-size: 12px; color: #6b7280; }
   </style>
@@ -47,20 +56,27 @@
 <body>
   <h1>📂 待搬任務清單 <span id="statusLine"></span></h1>
   <button id="btnReload">重新整理</button>
+    <label>樓層：
+    <select id="selGroup">
+      <option value="all">全部</option>
+      <option value="4F">4F</option>
+      <option value="7F">7F</option>
+    </select>
+  </label>
+
   <span id="pendingCount" class="muted"></span>
+  
 
   <table id="pendingTable">
     <thead>
       <tr>
-        <th>HistoryId</th>
-        <th>FileId</th>
+        <th>No.</th>
+        
         <th>節目名稱</th>
         <th>檔名(UserBit)</th>
-        <th>來源（完整檔案路徑）</th>
-        <th>目的地（完整檔案路徑）</th>
-        <th>FromStorageId</th>
-        <th>ToStorageId</th>
-        <!-- 新增：進度 -->
+        <th>來源</th>
+        <th>目的地</th>
+      
         <th style="width:220px;">進度</th>
       </tr>
     </thead>
@@ -71,17 +87,19 @@
   </table>
 
   <script>
-    
-    const API_PENDING = 'jobs/pending';      // 你的 JobsController
-    const API_EVENTS  = '/api/progress/events';// 你的 ProgressController
+  const API_PENDING = 'jobs/pending';      // 你的 JobsController
+  const API_EVENTS  = '/api/progress/events';// 你的 ProgressController
 
-    const $btnReload = document.getElementById('btnReload');
-    const $tableBody = document.querySelector('#pendingTable tbody');
-    const $count = document.getElementById('pendingCount');
-    const $status = document.getElementById('statusLine');
+  const $btnReload = document.getElementById('btnReload');
+  const $tableBody = document.querySelector('#pendingTable tbody');
+  const $count = document.getElementById('pendingCount');
+  const $status = document.getElementById('statusLine');
+  const $selGroup = document.getElementById('selGroup');
 
-    // 進度工具：依 historyId 設定 %（0~100）
-// 進度工具：依 historyId / destId 設定 %（0~100）
+  // 目前所有「檔案級」的 pending rows（API 回來的原始資料）
+  let allRows = [];
+
+  // 進度工具：依 historyId / destId 設定 %（0~100）
   function setProgressForHistory(id, percent) {
     const key = String(id);
     const p = Math.max(0, Math.min(100, Math.round(percent || 0)));
@@ -95,119 +113,188 @@
       });
   }
 
-    async function loadPending() {
-      $btnReload.disabled = true;
-      $btnReload.textContent = '載入中…';
-      $count.textContent = '';
+  // 依目前的 selGroup 把 allRows 篩選＋分組＋畫到 table
+  function renderTable() {
+    $tableBody.innerHTML = '';
 
-      try {
-        const resp = await fetch(API_PENDING + '?take=200&ts=' + Date.now(), { cache: 'no-store' });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const rows = await resp.json();
-
-        $tableBody.innerHTML = '';
-
-        if (!rows || rows.length === 0) {
-          $tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
-          $count.textContent = '0 筆';
-          return;
-        }
-
-        const frag = document.createDocumentFragment();
-        rows.forEach(r => {
-  const kind = (r.taskKind || '').toLowerCase();  // "move" or "delete"
-  let progressKey;
-
-  if (kind === 'delete') {
-    // 刪除：用 HistoryId 當 key，對應後端 jobId / destId = HistoryId.ToString()
-    progressKey = String(r.historyId);
-  } else {
-    // 搬移：用 TO-StorageId，對應後端 DestId = "TO-<id>"
-    progressKey = (r.toStorageId != null && r.toStorageId !== undefined)
-      ? `TO-${r.toStorageId}`
-      : `TO-${r.fromStorageId}`;
-  }
-
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td>${r.historyId}</td>
-    <td>${r.fileId}</td>
-    <td>${r.programName || ''}</td>
-    <td>${r.fileName || ''}</td>
-    <td class="mono path">${r.sourcePath ? r.sourcePath.replaceAll('\\\\', '\\') : ''}</td>
-    <td class="mono path">${r.destPath ? r.destPath.replaceAll('\\\\', '\\') : ''}</td>
-    <td>${r.fromStorageId}</td>
-    <td>${r.toStorageId}</td>
-    <td>
-      <div class="progress-wrap" data-progress-key="${progressKey}">
-        <div class="progress"><div style="width:0%"></div></div>
-        <div class="progress-text">0%</div>
-      </div>
-    </td>
-  `;
-  frag.appendChild(tr);
-});
-
-        $tableBody.appendChild(frag);
-        $count.textContent = rows.length + ' 筆';
-      } catch (err) {
-        console.error(err);
-        $tableBody.innerHTML = `<tr><td colspan="9" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
-      } finally {
-        $btnReload.disabled = false;
-        $btnReload.textContent = '重新整理';
-      }
+    if (!allRows || allRows.length === 0) {
+      $tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
+      $count.textContent = '0 筆';
+      return;
     }
 
-    // 即時監聽全部工作的進度（依 DestId 更新）
+    const selected = $selGroup.value; // "all" / "4F" / "7F"
 
-    function startProgressListener() {
-  let es;
+    // ★ 依樓層篩選：用後端回來的 sourceGroup
+    let filtered = allRows;
+    if (selected !== 'all') {
+      filtered = allRows.filter(r => {
+        const g = (r.sourceGroup || '').toUpperCase();
+        return g === selected.toUpperCase();
+      });
+    }
 
-  function connect() {
-    es = new EventSource('/api/progress/events');
-    $status.textContent = '（已連線進度事件）';
+    if (filtered.length === 0) {
+      $tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">（選擇的樓層目前沒有待搬任務）</td></tr>`;
+      $count.textContent = '0 筆';
+      return;
+    }
 
-    es.addEventListener('progress', (e) => {
-      try {
-        const jobs = JSON.parse(e.data);
-        if (!Array.isArray(jobs)) return;
+    // ---- 依「進度 key」分組（同一顆目的地一組）----
+    const groupMap = new Map();
+    const groups = [];
 
-        for (const job of jobs) {
-          if (!Array.isArray(job.targets)) continue;
+    for (const r of filtered) {
+      const kind = (r.taskKind || '').toLowerCase();  // "move" or "delete"
+      let progressKey;
 
-          for (const t of job.targets) {
-            // ★ IJobProgress 裡的是 destId，不是 historyId
-            //   我們後端有把 destId 設成 $"{HistoryId}"，
-            //   所以前端直接拿 destId 當 key，就能對到 data-history-id。
-            if (t.destId != null) {
-              setProgressForHistory(t.destId, t.percent);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('progress parse error', err);
+      if (kind === 'delete') {
+        // 刪除：一筆就是一組，用 HistoryId 當 key
+        progressKey = String(r.historyId);
+      } else {
+        // 搬移：用 TO-StorageId，代表「同一顆目的地」
+        progressKey = (r.toStorageId != null && r.toStorageId !== undefined)
+          ? `TO-${r.toStorageId}`
+          : `TO-${r.fromStorageId}`;
       }
+
+      let g = groupMap.get(progressKey);
+      if (!g) {
+        g = { key: progressKey, kind, rows: [] };
+        groupMap.set(progressKey, g);
+        groups.push(g);
+      }
+      g.rows.push(r);
+    }
+
+    const frag = document.createDocumentFragment();
+
+    groups.forEach((g, idx) => {
+      const first = g.rows[0];
+
+      const programName = g.rows
+        .map(x => x.programName || '')
+        .join('<br>');
+
+      const fileName = g.rows
+        .map(x => x.fileName || '')
+        .join('<br>');
+
+      const sourceStorage = first.sourceStorage || '';
+      const destStorage   = first.destStorage || '';
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx + 1}</td>
+        <td>${programName}</td>
+        <td>${fileName}</td>
+        <td>${sourceStorage}</td>
+        <td>${destStorage}</td>
+        <td>
+          <div class="progress-wrap" data-progress-key="${g.key}">
+            <div class="progress"><div style="width:0%"></div></div>
+            <div class="progress-text">0%</div>
+            <div class="progress-file"></div>
+          </div>
+        </td>
+      `;
+      frag.appendChild(tr);
     });
 
-    es.onopen = () => {
-      $status.textContent = '（已連線進度事件）';
-    };
-
-    es.onerror = () => {
-      $status.textContent = '（進度事件斷線，重試中…）';
-      try { es.close(); } catch {}
-      setTimeout(connect, 1500);
-    };
+    $tableBody.appendChild(frag);
+    // 這裡的「筆數」用檔案筆數，而不是分組數
+    $count.textContent = filtered.length + ' 筆';
   }
 
-  connect();
-}
+  async function loadPending() {
+    $btnReload.disabled = true;
+    $btnReload.textContent = '載入中…';
+    $count.textContent = '';
 
+    try {
+      const resp = await fetch(API_PENDING + '?take=200&ts=' + Date.now(), { cache: 'no-store' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const rows = await resp.json();
 
-$btnReload.addEventListener('click', loadPending);
-loadPending();
-startProgressListener();
+      // ★ 把原始資料存起來，給 renderTable 使用
+      allRows = Array.isArray(rows) ? rows : [];
+
+      renderTable();
+    } catch (err) {
+      console.error(err);
+      $tableBody.innerHTML = `<tr><td colspan="6" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+    } finally {
+      $btnReload.disabled = false;
+      $btnReload.textContent = '重新整理';
+    }
+  }
+
+  // 即時監聽全部工作的進度（依 DestId 更新）
+  function setCurrentFileForDest(destKey, fileName) {
+    const key = String(destKey);
+    document.querySelectorAll(`.progress-wrap[data-progress-key="${key}"]`)
+      .forEach(wrap => {
+        const el = wrap.querySelector('.progress-file');
+        if (el) el.textContent = fileName;
+      });
+  }
+
+  function startProgressListener() {
+    let es;
+
+    function connect() {
+      es = new EventSource('/api/progress/events');
+      $status.textContent = '（已連線進度事件）';
+
+      es.addEventListener('progress', (e) => {
+        try {
+          const jobs = JSON.parse(e.data);
+          if (!Array.isArray(jobs)) return;
+
+          for (const job of jobs) {
+            if (!Array.isArray(job.targets)) continue;
+
+            for (const t of job.targets) {
+              if (!t.destId) continue;
+
+              console.log(
+                'progress event:',
+                'destId=', t.destId,
+                'percent=', t.percent,
+                'currentFile=', t.currentFile
+              );
+
+              setProgressForHistory(t.destId, t.percent);
+
+              if ('currentFile' in t) {
+                setCurrentFileForDest(t.destId, t.currentFile || '');
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('progress parse error', err);
+        }
+      });
+
+      es.onopen = () => {
+        $status.textContent = '（已連線進度事件）';
+      };
+
+      es.onerror = () => {
+        $status.textContent = '（進度事件斷線，重試中…）';
+        try { es.close(); } catch {}
+        setTimeout(connect, 1500);
+      };
+    }
+
+    connect();
+  }
+
+  $btnReload.addEventListener('click', loadPending);
+  $selGroup.addEventListener('change', renderTable);  // ★ 切換樓層時重畫
+
+  loadPending();
+  startProgressListener();
 </script>
 
 </body>

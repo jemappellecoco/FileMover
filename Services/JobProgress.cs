@@ -9,8 +9,10 @@ namespace FileMoverWeb.Services
     {
         void InitTotals(string jobId, Dictionary<string, long> totalsByDest);
         void AddCopied(string jobId, string destId, long deltaBytes);
+        void SetCurrentFile(string jobId, string destId, string fileName); 
         IReadOnlyList<TargetProgress> Snapshot(string jobId);
         void CompleteJob(string jobId);
+        
     }
 
     public sealed class JobProgress : IJobProgress
@@ -31,7 +33,28 @@ namespace FileMoverWeb.Services
             }
             //  Console.WriteLine($"[Progress] InitTotals job={jobId}, dests={string.Join(",", totalsByDest.Select(k => $"{k.Key}:{k.Value}"))}");
         }
-        
+          // ★ 新增：設定某個 jobId / destId 的「目前檔名」
+        public void SetCurrentFile(string jobId, string destId, string fileName)
+        {
+            var key = (jobId: jobId, destId: destId);
+
+            _map.AddOrUpdate(
+                key,
+                _ => new TargetProgress
+                {
+                    JobId       = jobId,
+                    DestId      = destId,
+                    TotalBytes  = 0,
+                    CopiedBytes = 0,
+                    CurrentFile = fileName
+                },
+                (_, exist) =>
+                {
+                    exist.CurrentFile = fileName;
+                    return exist;
+                }
+            );
+        }
         // 回報「增量 bytes」
         public void AddCopied(string jobId, string destId, long deltaBytes)
         {

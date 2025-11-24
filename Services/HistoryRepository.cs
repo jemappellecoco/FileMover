@@ -47,7 +47,7 @@ namespace FileMoverWeb.Services
         public DateTime CreateTime { get; set; }       // FileData_History.create_time
         // 目前狀態（0 / 1 / -1）
         public int FileStatus { get; set; }
-
+       
         // 後端自動組完整路徑（含 .mxf）
         public string? FullSourcePath =>
             string.IsNullOrWhiteSpace(FromPath) || string.IsNullOrWhiteSpace(UserBit)
@@ -78,7 +78,7 @@ namespace FileMoverWeb.Services
         public async Task<List<HistoryTask>> ListPendingAsync(int topN, CancellationToken ct)
         {
             if (topN <= 0) topN = 50;
-
+            var group = _cfg.GetValue<string>("FloorRouting:Group");
             using var conn = _factory.Create();
 
             var sql = @"
@@ -92,6 +92,7 @@ SELECT TOP (@n)
     s_from.id            AS FromStorageId,
     s_from.storage_name  AS FromName,
     s_from.location      AS FromPath,
+    s_from.set_group     AS FromGroup,
     s_to.id              AS ToStorageId,
     s_to.storage_name    AS ToName,
     s_to.location        AS ToPath,
@@ -106,12 +107,13 @@ LEFT JOIN dbo.Storage AS s_to  ON s_to.id   = h.to_storage_id
 LEFT JOIN dbo.UserData AS u    ON u.id = h.user_id
 
 WHERE h.file_status IN (0, 1, -1)                      -- ⭐ 把 1 加進來
+ AND (@group IS NULL OR @group = '' OR s_from.set_group = @group)  -- ★ 依樓層過濾
 ORDER BY 
     CASE WHEN h.file_status = 1 THEN 0 ELSE 1 END,    -- ⭐ 讓「執行中」排上面
     h.create_time ASC;";
 
             var rows = await conn.QueryAsync<HistoryTask>(
-                new CommandDefinition(sql, new { n = topN }, cancellationToken: ct));
+                new CommandDefinition(sql, new { n = topN, group }, cancellationToken: ct));
 
             return rows.ToList();
         }
@@ -134,32 +136,32 @@ ORDER BY
 
                 var ids = await conn.QueryAsync<int>(
                     new CommandDefinition(@"
-            ;WITH P AS (
-            SELECT TOP (@n) h.id
-            FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
-            JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id 
-            WHERE
-                    -- ✅ 只處理 copy 任務
-                    h.action = 'copy'
-                AND (@group IS NULL OR s_from.set_group = @group)
-                AND (
-                        -- 新任務：0
-                        h.file_status = 0
-                        -- ✅ 卡在 1 超過 retryMinutes 分鐘 → 視為需重試
-                    OR (h.file_status = 1
-                        AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
-                    )
-            ORDER BY h.create_time ASC
-            )
-            UPDATE h
-            SET h.file_status = 1,
-                h.update_time = GETDATE()
-            OUTPUT inserted.id
-            FROM dbo.FileData_History h
-            JOIN P ON P.id = h.id;",
-                        new { n = batchSize, retryMin = retryMinutes , group },
+                ;WITH P AS (
+                    SELECT TOP (@n) h.id
+                    FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
+                    JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id 
+                    WHERE
+                            -- ✅ 只處理 copy 任務
+                            h.action = 'copy'
+                        AND (@group IS NULL OR s_from.set_group = @group)
+                        AND (
+                                -- 新任務
+                                h.file_status = 0
+                            OR (h.file_status = 1
+                                AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
+                            )
+                    ORDER BY h.create_time ASC
+                )
+                UPDATE h
+                SET h.file_status = 1,
+                    h.update_time = GETDATE()
+                OUTPUT inserted.id
+                FROM dbo.FileData_History h
+                JOIN P ON P.id = h.id;",
+                        new { n = batchSize, retryMin = retryMinutes, group },
                         transaction: tran,
                         cancellationToken: ct));
+
 
                 if (!ids.Any())
                 {
@@ -285,6 +287,7 @@ WHERE id = @historyId;";
 public async Task<List<HistoryTask>> ClaimDeleteAsync(
     int batchSize,
     int retryMinutes,
+    string? group,
     CancellationToken ct)
 {
     using var conn = _factory.Create();
@@ -296,8 +299,10 @@ public async Task<List<HistoryTask>> ClaimDeleteAsync(
 ;WITH P AS (
   SELECT TOP (@n) h.id
   FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
+  JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id      -- ★ 補上 JOIN
   WHERE
         h.action = 'delete'
+    AND (@group IS NULL OR s_from.set_group = @group)           -- ★ 依樓層過濾
     AND (
             h.file_status = -1
          OR (h.file_status = 1
@@ -310,7 +315,7 @@ SET h.file_status = 1, h.update_time = GETDATE()
 OUTPUT inserted.id
 FROM dbo.FileData_History h
 JOIN P ON P.id = h.id;",
-            new { n = batchSize, retryMin = retryMinutes },
+            new { n = batchSize, retryMin = retryMinutes, group },  // ★ 加上 group
             transaction: tran, cancellationToken: ct));
 
     List<HistoryTask> tasks = new();
@@ -327,10 +332,12 @@ SELECT
   f.UserBit         AS UserBit,
   s_from.location   AS FromPath,
   s_to.location     AS ToPath,
-  CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData     -- ★ NEW
+  s_from.set_group  AS FromGroup,         -- ★ 可選：要的話就補上
+  s_to.set_group    AS ToGroup,           -- ★ 可選
+  CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData
 FROM dbo.FileData_History h
-LEFT JOIN dbo.FileData f     ON f.id       = h.file_id        -- ★ 改 LEFT JOIN
-JOIN dbo.Storage s_from ON s_from.id  = h.from_storage_id
+LEFT JOIN dbo.FileData f     ON f.id       = h.file_id
+JOIN dbo.Storage s_from      ON s_from.id  = h.from_storage_id
 LEFT JOIN dbo.Storage s_to   ON s_to.id    = h.to_storage_id
 WHERE h.id IN @ids;",
                 new { ids }, transaction: tran, cancellationToken: ct))).ToList();
@@ -339,6 +346,7 @@ WHERE h.id IN @ids;",
     tran.Commit();
     return tasks;
 }
+
 
 
 /// <summary>刪除成功：status='12'</summary>

@@ -233,7 +233,10 @@ namespace FileMoverWeb.Services
                                         DestPath      = dst,
 
                                         // RESTORE 共用一條進度
-                                        DestId = $"RESTORE-{restoreId}"
+                                            DestId = t.ToStorageId.HasValue
+                                                ? $"TO-{t.ToStorageId.Value}"
+                                                : $"TO-{t.FromStorageId}"   // 防禦性 fallback
+
                                     };
                                 }).ToList()
                             };
@@ -302,7 +305,7 @@ namespace FileMoverWeb.Services
 
 
                     // 2) 刪除任務（status = -1 → 1）
-                    var deleteTasks = await repo.ClaimDeleteAsync(batch, retryMin, stoppingToken);
+                    var deleteTasks = await repo.ClaimDeleteAsync(batch, retryMin, group, stoppingToken);
                     Console.WriteLine($"[DEL-CLAIM]  {DateTime.Now:HH:mm:ss} claimed {deleteTasks.Count} tasks: " +
                         string.Join(",", deleteTasks.Select(t => t.HistoryId)));
 

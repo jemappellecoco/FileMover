@@ -19,6 +19,7 @@ public sealed class MoveBatchRequest
 {
     public required string JobId { get; init; }
     public required List<MoveItem> Items { get; init; }
+    
 }
 
 public sealed class TargetProgress
@@ -27,7 +28,7 @@ public sealed class TargetProgress
     public required string DestId { get; set; }
     public long CopiedBytes { get; set; }
     public long TotalBytes  { get; set; }
-
+    public string? CurrentFile { get; set; }     // ★ 新增
     // 0~100 夾住
     public double Percent =>
         TotalBytes <= 0 ? 0
