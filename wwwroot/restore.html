@@ -1,0 +1,218 @@
+<!doctype html> 
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>待回遷清單（Phase2）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial;
+      margin: 32px;
+      background: #fafafa;
+    }
+    h1 { font-size: 22px; margin-bottom: 12px; }
+
+    button {
+      padding: 8px 14px; border: 0; border-radius: 8px;
+      background: #111827; color: #fff; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: default; }
+
+    .muted { color: #6b7280; margin-left: 8px; }
+
+    table {
+      width: 100%; border-collapse: collapse; margin-top: 16px; background: #fff;
+      table-layout: fixed; word-break: break-all;
+    }
+    th, td {
+      padding: 8px 10px; border-bottom: 1px solid #eee;
+      font-size: 14px; text-align: left; vertical-align: top;
+    }
+    th { background: #f9fafb; position: sticky; top: 0; z-index: 1; }
+    tr:hover td { background: #f3f4f6; }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px; white-space: pre-wrap; word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <h1>📦 待回遷清單（Phase2）</h1>
+
+  <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+    <button id="btnindex">回首頁</button>
+    
+     <button id="btnHisroty">查看歷史紀錄</button>
+     <button id="btnReload">重新整理</button>
+    <button id="btnRestore" disabled>回遷選取項目</button>
+    <span id="info" class="muted"></span>
+  </div>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <!-- 全選 -->
+        <th style="width:40px;">
+          <input type="checkbox" id="chkAll" />
+        </th>
+        <!-- No. 流水號 -->
+        <th style="width:60px;">No.</th>
+        <th style="width:180px;">節目名稱</th>
+        <th style="width:200px;">檔名(UserBit)</th>
+        <th>來源（RESTORE 路徑）</th>
+        <th>目的（回遷目的地）</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td colspan="6" style="text-align:center;color:#999;">載入中…</td></tr>
+    </tbody>
+  </table>
+
+<script>
+  const API_PHASE2_LIST  = '/jobs/phase2-pending';
+  const API_PHASE2_START = '/jobs/phase2/start';
+
+  const $tbody      = document.querySelector('#tbl tbody');
+  const $btnReload  = document.getElementById('btnReload');
+  const $btnRestore = document.getElementById('btnRestore');
+  const $chkAll     = document.getElementById('chkAll');
+  const $info       = document.getElementById('info');
+const $btnindex = document.getElementById('btnindex');
+const $btnHisroty = document.getElementById('btnHisroty');
+  let currentRows = [];
+
+  function updateButtons() {
+    const checked = document.querySelectorAll('.row-check:checked').length;
+    $btnRestore.disabled = checked === 0;
+    $btnRestore.textContent = checked > 0
+      ? `回遷選取項目（${checked} 筆）`
+      : '回遷選取項目';
+  }
+
+  function render(rows) {
+    currentRows = rows;
+    $tbody.innerHTML = '';
+
+    if (!rows || rows.length === 0) {
+      $tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">（目前沒有待回遷的任務）</td></tr>`;
+      $info.textContent = '0 筆';
+      $chkAll.checked = false;
+      updateButtons();
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+
+    rows.forEach((r, idx) => {
+      const tr = document.createElement('tr');
+      const src = (r.sourcePath || '').replaceAll('\\\\','\\');
+      const dst = (r.destPath   || '').replaceAll('\\\\','\\');
+
+      tr.innerHTML = `
+        <td>
+          <input type="checkbox" class="row-check"
+                 data-hid="${r.historyId}" />
+        </td>
+        <td>${idx + 1}</td>
+        <td>${r.programName || ''}</td>
+        <td>${r.fileName || ''}</td>
+        <td>${r.sourceStorage || ''}</td>
+        <td>${r.destStorage || ''}</td>
+      `;
+      frag.appendChild(tr);
+    });
+
+    $tbody.appendChild(frag);
+    $info.textContent = rows.length + ' 筆';
+
+    // 綁定 row checkbox 事件
+    document.querySelectorAll('.row-check').forEach(chk => {
+      chk.addEventListener('change', () => {
+        const all = document.querySelectorAll('.row-check').length;
+        const checked = document.querySelectorAll('.row-check:checked').length;
+        $chkAll.checked = (all > 0 && checked === all);
+        updateButtons();
+      });
+    });
+
+    $chkAll.checked = false;
+    updateButtons();
+  }
+
+  async function loadPhase2() {
+    $btnReload.disabled = true;
+    $btnReload.textContent = '載入中…';
+    $info.textContent = '';
+    $tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">載入中…</td></tr>`;
+
+    try {
+      const resp = await fetch(API_PHASE2_LIST + '?take=300&ts=' + Date.now(), {
+        cache: 'no-store'
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const rows = await resp.json();
+      render(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      console.error(err);
+      $tbody.innerHTML = `<tr><td colspan="6" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
+    } finally {
+      $btnReload.disabled = false;
+      $btnReload.textContent = '重新整理';
+    }
+  }
+
+
+
+  async function doRestore() {
+    const checked = Array.from(document.querySelectorAll('.row-check:checked'));
+    if (checked.length === 0) return;
+
+    const ids = checked.map(ch => parseInt(ch.dataset.hid, 10)).filter(x => !isNaN(x));
+
+    if (!confirm(`確定要送出 ${ids.length} 筆回遷任務嗎？`)) return;
+
+    $btnRestore.disabled = true;
+    $btnRestore.textContent = '送出中…';
+
+    try {
+      const resp = await fetch(API_PHASE2_START, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ historyIds: ids })
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const result = await resp.json();
+      alert(result.message || '已送出回遷');
+
+      await loadPhase2(); // 重新載入列表
+    } catch (err) {
+      console.error(err);
+      alert('回遷失敗：' + err.message);
+    } finally {
+      $btnRestore.disabled = false;
+      updateButtons();
+    }
+  }
+
+  // 全選 / 全不選
+  $chkAll.addEventListener('change', () => {
+    const on = $chkAll.checked;
+    document.querySelectorAll('.row-check').forEach(ch => {
+      ch.checked = on;
+    });
+    updateButtons();
+  });
+    $btnindex.addEventListener('click', () => {
+    window.location.href='index.html';
+  });
+  $btnHisroty.addEventListener('click', () => {
+    window.location.href='history.html';
+  });
+  $btnReload.addEventListener('click', loadPhase2);
+  $btnRestore.addEventListener('click', doRestore);
+
+  // 初次載入
+  loadPhase2();
+</script>
+</body>
+</html>

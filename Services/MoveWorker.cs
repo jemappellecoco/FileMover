@@ -36,17 +36,23 @@ namespace FileMoverWeb.Services
             _progress = progress;
             _logger = logger;
         }
-
+        
         /// <summary>
         /// 執行一個搬運批次，回傳每筆結果。
         /// </summary>
-        public async Task<List<MoveResult>> RunAsync(MoveBatchRequest req, CancellationToken ct = default)
+        public Task<List<MoveResult>> RunAsync(MoveBatchRequest req, CancellationToken ct = default)
+            => RunAsync(req, onItemDone: null, ct);
+
+        /// <summary>
+        /// 執行一個搬運批次，回傳每筆結果，並可在每筆完成時回呼 onItemDone。
+        /// </summary>
+        public async Task<List<MoveResult>> RunAsync(
+            MoveBatchRequest req,
+            Func<MoveResult, Task>? onItemDone,
+            CancellationToken ct = default)
         {
             if (req is null) throw new ArgumentNullException(nameof(req));
             if (req.Items is null || req.Items.Count == 0) return new List<MoveResult>(0);
-
-            // 新任務開始：清掉前一輪快照，避免 UI 還停在 100%
-            // _progress.CompleteJob(req.JobId);
 
             // 1) 預估總量（按 DestId 彙總），避免中途才知道總大小
             var totals = req.Items
@@ -70,7 +76,6 @@ namespace FileMoverWeb.Services
                 );
 
             _progress.InitTotals(req.JobId, totals);
- 
 
             // 2) 依 DestId 分組處理（同一 Dest 串行，不同 Dest 受限度並行）
             var destGroups = req.Items
@@ -84,7 +89,14 @@ namespace FileMoverWeb.Services
                 await _destLimiter.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    await MoveGroupAsync(req.JobId, g.destId, g.items, results, ct).ConfigureAwait(false);
+                    await MoveGroupAsync(
+                        req.JobId,
+                        g.destId,
+                        g.items,
+                        results,
+                        onItemDone,
+                        ct
+                    ).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -94,23 +106,34 @@ namespace FileMoverWeb.Services
 
             await Task.WhenAll(tasks).ConfigureAwait(false);
 
-            // 視需求決定是否在全部完成後清空快照：
+            // 要不要在這裡 CompleteJob 看你前端需求，目前你是註解掉就照舊
             // _progress.CompleteJob(req.JobId);
-            // _progress.CompleteJob(req.JobId);
+
             return results.ToList();
         }
+
 
        /// <summary>
         /// 同一個 DestId 共用一個 progress job
         /// </summary>
+/// <summary>
+/// 同一個 DestId 共用一個 progress job
+/// </summary>
 private async Task MoveGroupAsync(
-    string jobId, string destId, List<MoveItem> items,
-    ConcurrentBag<MoveResult> results, CancellationToken ct)
+    string jobId,
+    string destId,
+    List<MoveItem> items,
+    ConcurrentBag<MoveResult> results,
+    Func<MoveResult, Task>? onItemDone,
+    CancellationToken ct)
 {
     foreach (var item in items)
     {
         ct.ThrowIfCancellationRequested();
         Console.WriteLine($"[MOVE] job={jobId}, historyId={item.HistoryId}, src={item.SourcePath}");
+
+        MoveResult result;
+
         try
         {
             // 路徑拼不出來（多半是沒 FileData / 沒 UserBit） → 911
@@ -120,92 +143,185 @@ private async Task MoveGroupAsync(
                     "[{Job}] Source path empty (HistoryId={HistoryId})，多半是缺 FileData/UserBit。",
                     jobId, item.HistoryId);
 
-                results.Add(new MoveResult
+                result = new MoveResult
                 {
                     HistoryId  = item.HistoryId ?? 0,
                     Success    = false,
                     StatusCode = 911,
                     Error      = "Source path empty (no FileData/UserBit)"
-                });
-                continue;
+                };
             }
-
             // 911：來源不存在
-            if (!File.Exists(item.SourcePath))
+            else if (!File.Exists(item.SourcePath))
             {
                 _logger.LogWarning("[{Job}] Source not found: {Src}", jobId, item.SourcePath);
-                results.Add(new MoveResult
+
+                result = new MoveResult
                 {
                     HistoryId  = item.HistoryId ?? 0,
                     Success    = false,
                     StatusCode = 911,
                     Error      = $"Source not found: {item.SourcePath}"
-                });
-                continue;
+                };
             }
+            
 
-            // 正常搬移流程
-            var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
 
-            // ⭐ 重點：這裡用「同一個 jobId (整批) + 同一個 destId (STO-x)」
-            //    不再用 HistoryId 當 jobId/destId.
-            _progress.SetCurrentFile(jobId, destId, Path.GetFileName(item.SourcePath) ?? item.SourcePath);
-            await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct).ConfigureAwait(false);
+           else
+                {
+                    // 先讓前端知道目前在處理哪一個檔案（進度條上會顯示檔名）
+                    _progress.SetCurrentFile(
+                        jobId,
+                        destId,
+                        Path.GetFileName(item.SourcePath) ?? item.SourcePath);
 
-            results.Add(new MoveResult
-            {
-                HistoryId  = item.HistoryId ?? 0,
-                Success    = true,
-                StatusCode = 11,
-                Error      = null
-            });
-        }
+                    // ★ 在真正搬檔之前，確認來源檔案大小是否穩定
+                    var stable = await WaitFileSizeStableAsync(
+                        item.SourcePath,
+                        probes: 3,
+                        intervalMs: 800,
+                        ct: ct);
+
+                    if (!stable)
+                    {
+                        // 檔案大小仍在變化 → 視為正在寫入 / 使用中，不搬
+                        _logger.LogWarning(
+                            "[{Job}] Source file still changing, skip move: {Src}",
+                            jobId, item.SourcePath);
+
+                        result = new MoveResult
+                        {
+                            HistoryId  = item.HistoryId ?? 0,
+                            Success    = false,
+                            StatusCode = 912,  // 跟檔案使用中一樣，用 912 表示
+                            Error      = "Source file still changing (size not stable)"
+                        };
+                    }
+                    else
+                    {
+                        // ✅ 檔案穩定了，才開始真正搬
+                        var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
+
+                        await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, ct)
+                            .ConfigureAwait(false);
+
+                        result = new MoveResult
+                        {
+                            HistoryId  = item.HistoryId ?? 0,
+                            Success    = true,
+                            StatusCode = 11,
+                            Error      = null
+                        };
+                    }
+                }
+                }
+
         catch (IOException ex) when (IsSharingOrLockViolation(ex))   // 912
         {
             _logger.LogWarning(ex, "[{Job}] 檔案使用中（搬移失敗）：{Src}", jobId, item.SourcePath);
-            results.Add(new MoveResult
+            result = new MoveResult
             {
                 HistoryId  = item.HistoryId ?? 0,
                 Success    = false,
                 StatusCode = 912,
                 Error      = ex.Message
-            });
+            };
         }
         catch (DirectoryNotFoundException ex)                       // 914
         {
             _logger.LogWarning(ex, "[{Job}] 目的地路徑不存在（搬移失敗）：{Src}", jobId, item.SourcePath);
-            results.Add(new MoveResult
+            result = new MoveResult
             {
                 HistoryId  = item.HistoryId ?? 0,
                 Success    = false,
                 StatusCode = 914,
                 Error      = ex.Message
-            });
+            };
         }
         catch (UnauthorizedAccessException ex)                       // 913
         {
             _logger.LogWarning(ex, "[{Job}] 權限不足（搬移失敗）：{Src}", jobId, item.SourcePath);
-            results.Add(new MoveResult
+            result = new MoveResult
             {
                 HistoryId  = item.HistoryId ?? 0,
                 Success    = false,
                 StatusCode = 913,
                 Error      = ex.Message
-            });
+            };
         }
         catch (Exception ex)                                        // 91
         {
             _logger.LogError(ex, "[{Job}] 搬運失敗：{Src}", jobId, item.SourcePath);
-            results.Add(new MoveResult
+            result = new MoveResult
             {
                 HistoryId  = item.HistoryId ?? 0,
                 Success    = false,
                 StatusCode = 91,
                 Error      = ex.Message
-            });
+            };
+        }
+
+        // ⭐ 不管成功/失敗，都統一在這裡加入 results + 呼叫 callback
+        results.Add(result);
+        if (onItemDone != null)
+        {
+            await onItemDone(result).ConfigureAwait(false);
         }
     }
 }
+    /// <summary>
+/// 檔案大小在固定時間內維持不變才視為「穩定」
+/// 例：probes=3, intervalMs=800 → 約 1.6 秒內都沒有變化
+/// </summary>
+private static async Task<bool> WaitFileSizeStableAsync(
+    string path,
+    int probes = 3,
+    int intervalMs = 800,
+    CancellationToken ct = default)
+{
+    if (string.IsNullOrWhiteSpace(path))
+        return false;
+
+    if (!File.Exists(path))
+        return false;
+
+    long? lastSize = null;
+
+    for (int i = 0; i < probes; i++)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        long size;
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists)
+                return false;
+
+            size = fi.Length;
+        }
+        catch
+        {
+            // 讀不到大小就當作不穩定
+            return false;
+        }
+
+        if (lastSize.HasValue && size != lastSize.Value)
+        {
+            // 任兩次量測不一致 → 視為正在變化
+            return false;
+        }
+
+        lastSize = size;
+
+        // 最後一次不用再等
+        if (i < probes - 1)
+            await Task.Delay(intervalMs, ct).ConfigureAwait(false);
+    }
+
+    return true;
+}
+
 
 
 

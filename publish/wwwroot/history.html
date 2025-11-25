@@ -34,8 +34,10 @@
     .status-pill {
       display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700;
     }
+       
     .ok { background:#e6f6ec; color:#146c2e; border:1px solid #b9ebcd; }
     .fail { background:#fdecec; color:#b42318; border:1px solid #f7c6c5; }
+    .pending { background:#fff7ed; color:#c05621; border:1px solid #fed7aa; }  /* ★ 新增 */
   </style>
 </head>
 
@@ -43,7 +45,11 @@
   <h1>🗂️ 搬運歷史紀錄</h1>
 
   <div class="toolbar">
+    <button id="btnindex">回首頁</button>
+    <button id="btnRestore">查看回遷</button>
+    <button id="btnReload">重新整理</button>
     <label>狀態：
+       
       <select id="selStatus">
         <option value="all">全部</option>
 
@@ -63,6 +69,11 @@
           <option value="923">刪除失敗－權限不足 (923)</option>
           <option value="92">刪除失敗－其他 (92)</option>
         </optgroup>
+
+        <optgroup label="其他">
+          <option value="14">等待回遷 (14)</option>
+          <option value="17">等待回遷 (17)</option>
+        </optgroup>
       </select>
     </label>
 
@@ -74,8 +85,8 @@
       <input id="inpSearch" type="text" placeholder="輸入關鍵字，例如 2101EC3F" style="width:220px;">
     </label>
 
-    <button id="btnReload">重新整理</button>
-    <button id="btnExport">匯出 CSV</button>
+    
+    <!-- <button id="btnExport">匯出 CSV</button> -->
     <span id="rowCount" class="muted"></span>
   </div>
 
@@ -107,7 +118,8 @@
   const $btnExport = document.getElementById('btnExport');
   const $tbody     = document.querySelector('#histTable tbody');
   const $count     = document.getElementById('rowCount');
-
+  const $btnindex = document.getElementById('btnindex');
+  const $btnRestore = document.getElementById('btnRestore');
   let allRows = [];
   let currentRows = [];
 
@@ -124,7 +136,7 @@
     rows.forEach((r, idx) => {
       const tr = document.createElement('tr');
       const label = statusLabelFromCode(r.status);
-
+       const canRetry = isErrorStatus(r.status); 
       tr.innerHTML = `
         <td>${idx + 1}</td>
         <td>${r.programName || ''}</td>
@@ -132,7 +144,10 @@
         <td>${r.sourceStorage || ''}</td>
         <td>${r.destStorage || ''}</td>
         <td>${fmtDate(r.updateTime)}</td>
-        <td>${pillByLabel(label)}</td>
+        <td>
+        ${pillByLabel(label)}
+        ${canRetry ? `<button class="btn-retry" data-id="${r.historyId}" style="margin-left:6px;padding:2px 8px;font-size:12px;">重試</button>` : ''}
+      </td>
       `;
       frag.appendChild(tr);
     });
@@ -140,17 +155,46 @@
     $tbody.appendChild(frag);
     $count.textContent = rows.length + ' 筆';
     currentRows = rows;
+    bindRetryButtons(); 
   }
+  function bindRetryButtons() {
+  document.querySelectorAll('.btn-retry').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.id, 10);
+      if (!isNaN(id)) {
+        doRetry(id);
+      }
+    });
+  });
+}
 
+async function doRetry(historyId) {
+  if (!confirm(`確定要重試這筆任務（HistoryId = ${historyId}）嗎？`)) return;
+
+  try {
+    const resp = await fetch(`/history/${historyId}/retry`, {
+      method: 'POST'
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const result = await resp.json().catch(() => ({}));
+    alert(result.message || '已送出重試');
+
+    // 重新載入歷史紀錄，更新狀態/按鈕
+    await loadHistory();
+  } catch (err) {
+    console.error(err);
+    alert('重試失敗：' + err.message);
+  }
+}
   // === 狀態碼 → 中文標籤 ===
   function statusLabelFromCode(code) {
     const n = Number(code);
 
     if (n === 11) return '搬移成功';
     if (n === 12) return '刪除成功';
-
+    if (n === 14 || n === 17) return '等待回遷';
     if (n === 91)  return '搬移失敗（其他）';
-
+    
     if (n === 911) return '搬移失敗－找不到來源/檔案不存在';
     if (n === 912) return '搬移失敗－檔案使用中';
     if (n === 913) return '搬移失敗－權限不足';
@@ -177,7 +221,9 @@
 
     if (label.includes('失敗'))
       return `<span class="status-pill fail">${label}</span>`;
-
+    if (label.includes('等待回遷'))
+      return `<span class="status-pill pending">${label}</span>`;
+      
     return `<span class="status-pill">${label}</span>`;
   }
 
@@ -204,7 +250,15 @@
 
     render(rows);
   }
-
+  // === 判斷是否為「錯誤狀態」 ===
+  function isErrorStatus(code) {
+    const n = Number(code);
+    return [
+      91, 92,
+      911, 912, 913, 914,
+      921, 922, 923
+    ].includes(n);
+  }
   // === 從後端載入資料 ===
   async function loadHistory() {
     $btnReload.disabled = true;
@@ -281,11 +335,16 @@
 
   // === 綁定事件 ===
   $btnReload.addEventListener('click', loadHistory);
-  $btnExport.addEventListener('click', exportCSV);
+ 
   $selStatus.addEventListener('change', filterAndRender);
   $inpTake.addEventListener('change', loadHistory);
   $inpSearch.addEventListener('input', filterAndRender);
-
+  $btnindex.addEventListener('click', () => {
+  window.location.href='index.html';
+  });
+  $btnRestore.addEventListener('click', () => {
+  window.location.href='restore.html';
+  });
   // === 初次載入 ===
   loadHistory();
 </script>

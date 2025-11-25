@@ -2,84 +2,248 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
-  <title>檔案搬運控制台（多目的地 + 預檢衝突）</title>
+  <title>待搬任務清單</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", Arial; margin: 24px; }
-    h1 { margin-bottom: 8px; }
-    .row { margin-bottom: 12px; }
-    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    fieldset { border:1px solid #ddd; padding:12px; border-radius:8px; margin-bottom:16px; }
-    label { font-weight:600; display:block; margin: 6px 0; }
-    input[type=text] { width: 420px; padding:6px 10px; }
-    textarea { width: 720px; height: 220px; padding:8px; }
-    button { padding: 8px 12px; border:0; border-radius:8px; background:#111827; color:#fff; cursor:pointer; }
-    button:disabled { opacity:.5; cursor: default; }
-    .grid { display:grid; grid-template-columns: 160px 1fr; gap:8px 12px; align-items:center; }
-    .bar { width: 720px; height: 12px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
-    .bar > div { height: 100%; background: #3b82f6; transition: width .25s linear; }
-    .label { display:flex; justify-content:space-between; font-size: 14px; margin: 6px 0; }
-    .muted { color:#6b7280; }
-    .ok { color:#065f46; }
-    .err { color:#b91c1c; }
+    body {
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial;
+      margin: 32px;
+      background: #fafafa;
+    }
+    h1 { font-size: 22px; margin-bottom: 12px; }
+    button {
+      padding: 8px 14px; border: 0; border-radius: 8px;
+      background: #111827; color: #fff; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: default; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; background: #fff; table-layout: fixed; word-break: break-all; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; text-align: left; vertical-align: top; }
+    th { background: #f9fafb; position: sticky; top: 0; z-index: 1; }
+    tr:hover td { background: #f3f4f6; }
+    .muted { color: #6b7280; margin-left: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+    td.path { color: #111; }
 
-    /* --- Modal --- */
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; align-items: center; justify-content: center; z-index: 50; }
-    .modal { width: 960px; max-width: 95vw; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.25); overflow: hidden; }
-    .modal header { padding: 12px 16px; border-bottom: 1px solid #e5e7eb; display:flex; align-items:center; justify-content:space-between; }
-    .modal h3 { margin: 0; font-size: 18px; }
-    .modal .content { padding: 12px 16px; max-height: 65vh; overflow: auto; }
-    .modal footer { padding: 12px 16px; border-top: 1px solid #e5e7eb; display:flex; justify-content: space-between; gap:8px; }
-    .btn { padding:8px 12px; border-radius:8px; border:0; cursor:pointer; }
-    .btn.primary { background:#111827; color:#fff; }
-    .btn.ghost { background:#f3f4f6; color:#111827; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; font-size: 14px; vertical-align: top; }
-    th { background:#f9fafb; position: sticky; top: 0; z-index: 1; }
-    td .mono { font-size: 12px; }
-    select, input[type=text].rename { width: 100%; padding:6px 8px; }
-    .w-18 { width: 18ch; }
-    .w-28 { width: 28ch; }
-    .w-10 { width: 10ch; }
-    .w-16 { width: 16ch; }
-    .w-24 { width: 24ch; }
+    /* 進度條樣式 */
+    .progress-wrap { width: 210px; }
+    .progress {
+      width: 100%; height: 10px; background: #eee;
+      border-radius: 999px; overflow: hidden;
+    }
+    .progress > div {
+      height: 100%; width: 0%;
+      background: #4caf50;
+      transition: width .2s ease;
+    }
+    .progress-text {
+      font-size: 12px; color: #6b7280; margin-top: 4px; text-align: right;
+    }
+    .progress-file {
+      font-size: 12px;
+      color: #374151;
+      margin-top: 2px;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 210px;
+    }
+    /* 小小的狀態列 */
+    #statusLine { margin-left: 12px; font-size: 12px; color: #6b7280; }
+    
+        /* 小 tag 樣式（例如：回遷任務） */
+    .tag-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: #f97316; /* 橘色 */
+      color: #fff;
+      vertical-align: middle;
+    }
+
   </style>
 </head>
+
 <body>
-  <h1>📂 檔案搬運控制台（按目的地分組 + 預檢衝突）</h1>
-  <p class="muted">流程：先送 <code>/api/move/precheck</code> → 有衝突會跳出對話框讓你選（覆蓋/跳過/改名） → 送 <code>/api/move/batch/resolved</code> → 以 <code>/api/progress/&lt;jobId&gt;</code> 追蹤進度。</p>
-  <!-- 🔹 新增：目前待搬任務清單 -->
-  <!-- 放在你的控制台頁面（例如 Views/Home/Index.cshtml 或 wwwroot/index.html） -->
-<section>
-  <h3>0) 目前待搬任務</h3>
-  <button id="btnReload" class="btn">重新整理任務清單</button>
-  <span id="pendingCount" style="margin-left:8px;color:#666;"></span>
+  <h1>📂 待搬任務清單 <span id="statusLine"></span></h1>
+  <button id="btnHistory">查看歷史紀錄</button>
+     <button id="btnRestore">查看回遷</button>
+  <button id="btnReload">重新整理</button>
+    <label>樓層：
+    <select id="selGroup">
+      <option value="all">全部</option>
+      <option value="4F">4F</option>
+      <option value="7F">7F</option>
+    </select>
+     
+  </label>
 
-  <div style="overflow:auto;margin-top:10px;">
-    <table id="pendingTable" border="1" cellpadding="6" cellspacing="0" style="width:100%;border-collapse:collapse;">
-      <thead>
-        <tr>
-          <th>HistoryId</th>
-          <th>FileId</th>
-          <th>來源</th>
-          <th>目的地</th>
-          <th>FromStorageId</th>
-          <th>ToStorageId</th>
-        </tr>
-      </thead>
-      <tbody>
-        <!-- 這裡由 JS 動態塞資料 -->
-      </tbody>
-    </table>
-  </div>
-</section>
+  <span id="pendingCount" class="muted"></span>
+  
 
-<script>
-  const API_PENDING = '/jobs/pending'; // 對應你的 JobsController 路由
+  <table id="pendingTable">
+    <thead>
+      <tr>
+        <th>No.</th>
+        
+        <th>節目名稱</th>
+        <th>檔名(UserBit)</th>
+        <th>來源</th>
+        <th>目的地</th>
+      
+        <th style="width:220px;">進度</th>
+      </tr>
+    </thead>
+
+    <tbody>
+      <tr><td colspan="9" style="text-align:center;color:#999;">載入中…</td></tr>
+    </tbody>
+  </table>
+
+  <script>
+  //batch 紀錄
+  let batches = [];
+  let seenHistoryIds = new Set();
+  let hasScheduledReloadAfterDone = false;  // ★ 避免 100% 訊息來很多次狂重新整理
+
+  const API_PENDING = 'jobs/pending';      // 你的 JobsController
+  const API_EVENTS  = '/api/progress/events';// 你的 ProgressController
 
   const $btnReload = document.getElementById('btnReload');
   const $tableBody = document.querySelector('#pendingTable tbody');
   const $count = document.getElementById('pendingCount');
+  const $status = document.getElementById('statusLine');
+  const $selGroup = document.getElementById('selGroup');
+  const $btnHistory = document.getElementById('btnHistory');
+  const $btnRestore = document.getElementById('btnRestore');
+  // 目前所有「檔案級」的 pending rows（API 回來的原始資料）
+  let allRows = [];
+
+  // 進度工具：依 historyId / destId 設定 %（0~100）
+  function setProgressForHistory(id, percent) {
+    const key = String(id);
+    const p = Math.max(0, Math.min(100, Math.round(percent || 0)));
+
+    document.querySelectorAll(`.progress-wrap[data-progress-key="${key}"]`)
+      .forEach(wrap => {
+        const bar = wrap.querySelector('.progress > div');
+        const txt = wrap.querySelector('.progress-text');
+        if (bar) bar.style.width = p + '%';
+        if (txt) txt.textContent = p + '%';
+      });
+      // ★ 當這一組進度條到 100% 時：稍微停一下，然後自動重抓代辦清單
+  if (p >= 100 && !hasScheduledReloadAfterDone) {
+    hasScheduledReloadAfterDone = true;
+
+    // 想要多「發呆」一下就把 1500 換成 2000 / 3000ms
+    setTimeout(() => {
+      loadPending()         // 重新打 /jobs/pending，後端已把完成的任務從待辦中拿掉
+        .finally(() => {
+          hasScheduledReloadAfterDone = false;
+        });
+    }, 1500);
+  }
+  }
+
+  // 依目前的 selGroup 把 allRows 篩選＋分組＋畫到 table
+  function renderTable() {
+    $tableBody.innerHTML = '';
+
+    if (!allRows || allRows.length === 0) {
+      $tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
+      $count.textContent = '0 筆';
+      return;
+    }
+
+    const selected = $selGroup.value; // "all" / "4F" / "7F"
+
+    // ★ 依樓層篩選：用後端回來的 sourceGroup
+    let filtered = allRows;
+    if (selected !== 'all') {
+      filtered = allRows.filter(r => {
+        const g = (r.sourceGroup || '').toUpperCase();
+        return g === selected.toUpperCase();
+      });
+    }
+
+    if (filtered.length === 0) {
+      $tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#999;">（選擇的樓層目前沒有待搬任務）</td></tr>`;
+      $count.textContent = '0 筆';
+      return;
+    }
+
+    // ---- 依「進度 key」分組（同一顆目的地一組）----
+    const groupMap = new Map();
+    const groups = [];
+
+    for (const r of filtered) {
+      const kind = (r.taskKind || '').toLowerCase();  // "move" or "delete"
+      let progressKey;
+
+      if (kind === 'delete') {
+        // 刪除：一筆就是一組，用 HistoryId 當 key
+        progressKey = String(r.historyId);
+      } else {
+        // 搬移：用 TO-StorageId，代表「同一顆目的地」
+        progressKey = (r.toStorageId != null && r.toStorageId !== undefined)
+          ? `TO-${r.toStorageId}`
+          : `TO-${r.fromStorageId}`;
+      }
+
+      let g = groupMap.get(progressKey);
+      if (!g) {
+        g = { key: progressKey, kind, rows: [] };
+        groupMap.set(progressKey, g);
+        groups.push(g);
+      }
+      g.rows.push(r);
+       if (!g.tag && r.tag) {
+        g.tag = r.tag;
+      }
+    }
+
+    const frag = document.createDocumentFragment();
+
+    groups.forEach((g, idx) => {
+      const first = g.rows[0];
+
+      const programName = g.rows
+        .map(x => x.programName || '')
+        .join('<br>');
+
+      const fileName = g.rows
+        .map(x => x.fileName || '')
+        .join('<br>');
+
+      const sourceStorage = first.sourceStorage || '';
+      const destStorage   = first.destStorage || '';
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx + 1}
+          ${g.isPhase2 ? '<span class="tag-badge">回遷任務</span>' : ''}
+        </td>
+        <td>${programName}</td>
+        <td>${fileName}</td>
+        <td>${sourceStorage}</td>
+        <td>${destStorage}</td>
+        <td>
+          <div class="progress-wrap" data-progress-key="${g.key}">
+            <div class="progress"><div style="width:0%"></div></div>
+            <div class="progress-text">0%</div>
+            <div class="progress-file"></div>
+          </div>
+        </td>
+      `;
+      frag.appendChild(tr);
+    });
+
+    $tableBody.appendChild(frag);
+    // 這裡的「筆數」用檔案筆數，而不是分組數
+    $count.textContent = filtered.length + ' 筆';
+  }
 
   async function loadPending() {
     $btnReload.disabled = true;
@@ -87,393 +251,97 @@
     $count.textContent = '';
 
     try {
-      // 加上 time-bust 避免快取
       const resp = await fetch(API_PENDING + '?take=200&ts=' + Date.now(), { cache: 'no-store' });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const rows = await resp.json();
 
-      // 清空舊資料
-      $tableBody.innerHTML = '';
+      // ★ 把原始資料存起來，給 renderTable 使用
+      allRows = Array.isArray(rows) ? rows : [];
 
-      if (!rows || rows.length === 0) {
-        $tableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#999;">（目前沒有待搬任務）</td></tr>`;
-        $count.textContent = '0 筆';
-        return;
-      }
-
-      // 逐列渲染
-      const frag = document.createDocumentFragment();
-      rows.forEach(r => {
-        const tr = document.createElement('tr');
-
-        // 後端回傳欄位：HistoryId, FileId, FromStorageId, ToStorageId, SourcePath, DestPath
-        tr.innerHTML = `
-          <td>${r.historyId}</td>
-          <td>${r.fileId}</td>
-          <td title="${r.sourcePath || ''}">${(r.sourcePath || '').replaceAll('\\\\', '\\').slice(-120)}</td>
-          <td title="${r.destPath || ''}">${(r.destPath || '').replaceAll('\\\\', '\\').slice(-120)}</td>
-          <td>${r.fromStorageId}</td>
-          <td>${r.toStorageId}</td>
-        `;
-        frag.appendChild(tr);
-      });
-      $tableBody.appendChild(frag);
-      $count.textContent = rows.length + ' 筆';
+      renderTable();
     } catch (err) {
       console.error(err);
       $tableBody.innerHTML = `<tr><td colspan="6" style="color:#c00;">載入失敗：${err.message}</td></tr>`;
     } finally {
       $btnReload.disabled = false;
-      $btnReload.textContent = '重新整理任務清單';
+      $btnReload.textContent = '重新整理';
     }
   }
 
-  // 綁定事件與自動初次載入
-  $btnReload.addEventListener('click', loadPending);
-  loadPending();
-</script>
-
-
-  <fieldset>
-    <legend>1) 建立批次請求</legend>
-    <div class="grid">
-      <label for="jobId">Job Id</label>
-      <input id="jobId" type="text" value="job-abc" />
-
-      <label for="payload">Payload（可直接編輯 JSON）</label>
-      <div>
-        <textarea id="payload" class="mono">
-{
-  "jobId": "job-abc",
-  "items": [
-    { "sourcePath": "A:\\\\00000001.MXF", "destPath": "B:\\\\move\\\\00000001.MXF", "destId": "B" },
-    { "sourcePath": "A:\\\\00000000.MXF", "destPath": "B:\\\\move\\\\00000000.MXF", "destId": "B" },
-    { "sourcePath": "A:\\\\00000002.MXF", "destPath": "B:\\\\move\\\\00000002.MXF", "destId": "B" },
-    { "sourcePath": "A:\\\\00000003.MXF", "destPath": "Q:\\\\move\\\\00000003.MXF", "destId": "Q" }
-  ]
-}
-        </textarea>
-        <div class="muted">必填欄位：<code>jobId</code>、每個 item 需要 <code>sourcePath</code>、<code>destPath</code>、<code>destId</code>。</div>
-      </div>
-    </div>
-    <div class="row" style="display:flex; gap:8px; align-items:center;">
-      <button id="btnStart">開始搬運</button>
-      <button id="btnStop" disabled>停止輪詢</button>
-      <span id="msg" class="muted"></span>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>2) 進度（依 DestId 分組）</legend>
-    <div id="progressArea"></div>
-  </fieldset>
-
-  <!-- 衝突對話框 -->
-  <div id="dlgBackdrop" class="modal-backdrop">
-    <div class="modal">
-      <header>
-        <h3>發現檔名衝突，請選擇處理方式</h3>
-        <button id="dlgClose" class="btn ghost">關閉</button>
-      </header>
-      <div class="content">
-        <div style="display:flex; gap:8px; margin-bottom:8px;">
-          <button id="btnAllOverwrite" class="btn ghost">全部覆蓋</button>
-          <button id="btnAllSkip" class="btn ghost">全部跳過</button>
-        </div>
-        <table id="tblConflicts">
-          <thead>
-            <tr>
-                <th class="w-10">目的地</th>
-                <th>來源檔</th>
-                <th class="w-24">修改時間</th>
-                <th>目的檔</th>
-                <th class="w-24">修改時間</th>
-                <th class="w-16">衝突類型</th>
-                <th class="w-16">動作</th>
-                <th class="w-28">重新命名為</th>
-            </tr>
-        </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <footer>
-        <span class="muted">選完後開始執行，未衝突的檔案一律照原路徑搬運。</span>
-        <div style="display:flex; gap:8px;">
-          <button id="btnDlgCancel" class="btn ghost">取消</button>
-          <button id="btnDlgConfirm" class="btn primary">開始執行</button>
-        </div>
-      </footer>
-    </div>
-  </div>
-
-<script>
-
-
-
-  
-  const $ = (id) => document.getElementById(id);
-  let pollTimer = null;
-
-  function setMsg(text, klass="muted") {
-    const el = $("msg");
-    el.className = klass;
-    el.textContent = text;
+  // 即時監聽全部工作的進度（依 DestId 更新）
+  function setCurrentFileForDest(destKey, fileName) {
+    const key = String(destKey);
+    document.querySelectorAll(`.progress-wrap[data-progress-key="${key}"]`)
+      .forEach(wrap => {
+        const el = wrap.querySelector('.progress-file');
+        if (el) el.textContent = fileName;
+      });
   }
 
-  function formatBytes(n) {
-    const num = Number(n);
-    if (!Number.isFinite(num) || num <= 0) return "0 B";
-    const k = 1024;
-    const units = ["B","KB","MB","GB","TB","PB"];
-    const i = Math.min(units.length - 1, Math.floor(Math.log(num) / Math.log(k)));
-    const val = num / Math.pow(k, i);
-    return `${val.toFixed(2)} ${units[i]}`;
-  }
+  function startProgressListener() {
+    let es;
 
-  function renderProgress(list) {
-    const area = $("progressArea");
-    area.innerHTML = "";
+    function connect() {
+      es = new EventSource('/api/progress/events');
+      $status.textContent = '（已連線進度事件）';
 
-    if (!Array.isArray(list) || list.length === 0) {
-      const p = document.createElement("p");
-      p.className = "muted";
-      p.textContent = "尚無進度資料。";
-      area.appendChild(p);
-      return;
-    }
+      es.addEventListener('progress', (e) => {
+        try {
+          const jobs = JSON.parse(e.data);
+          if (!Array.isArray(jobs)) return;
 
-    list.forEach(tp => {
-      const wrap = document.createElement("div");
+          for (const job of jobs) {
+            if (!Array.isArray(job.targets)) continue;
 
-      const copied = Number(tp.copiedBytes) || 0;
-      const total  = Number(tp.totalBytes)  || 0;
-      const pctRaw = Number(tp.percent);
-      const pct    = Math.min(100, Math.max(0, Number.isFinite(pctRaw) ? pctRaw : 0));
+            for (const t of job.targets) {
+              if (!t.destId) continue;
 
-      const label = document.createElement("div");
-      label.className = "label";
-      label.innerHTML = `<strong>${tp.destId}</strong><span class="mono">${pct.toFixed(1)}% 　${formatBytes(copied)} / ${formatBytes(total)}</span>`;
+              console.log(
+                'progress event:',
+                'destId=', t.destId,
+                'percent=', t.percent,
+                'currentFile=', t.currentFile
+              );
 
-      const bar = document.createElement("div");
-      bar.className = "bar";
-      const fill = document.createElement("div");
-      fill.style.width = pct + "%";
-      bar.appendChild(fill);
+              setProgressForHistory(t.destId, t.percent);
 
-      wrap.appendChild(label);
-      wrap.appendChild(bar);
-      area.appendChild(wrap);
-    });
-  }
+              if ('currentFile' in t) {
+                setCurrentFileForDest(t.destId, t.currentFile || '');
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('progress parse error', err);
+        }
+      });
 
-  async function poll(jobId) {
-    try {
-      const res = await fetch(`/api/progress/${encodeURIComponent(jobId)}`);
-      if (!res.ok) throw new Error("progress api not ok");
-      const json = await res.json();
-      renderProgress(json);
-    } catch (e) {
-      console.error(e);
-      setMsg("進度查詢失敗（已停止輪詢）", "err");
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = null;
-      $("btnStop").disabled = true;
-    }
-  }
-
-  // ====== 衝突對話框 ======
-  let lastNormalizedItems = [];
-  let lastConflicts = [];
-
-  function showDialog() { $("dlgBackdrop").style.display = "flex"; }
-  function hideDialog() { $("dlgBackdrop").style.display = "none"; }
-
-    function buildConflictRows(conflicts) {
-  const tbody = document.getElementById("tblConflicts").querySelector("tbody");
-  tbody.innerHTML = "";
-
-  conflicts.forEach((c, idx) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><strong>${c.destId}</strong></td>
-      <td><div class="mono" title="${c.sourcePath}">${c.sourcePath}</div></td>
-      <td class="mono">${formatTime(c.sourceMtime)}</td>
-      <td><div class="mono" title="${c.destPath}">${c.destPath}</div></td>
-      <td class="mono">${formatTime(c.existingMtime)}</td>
-      <td>${c.kind === 0 ? "目的端已有檔案" : "同批次重複"}</td>
-      <td>
-        <select data-idx="${idx}" class="decision">
-          <option value="Overwrite">覆蓋</option>
-          <option value="Skip">跳過</option>
-          <option value="Rename">重新命名</option>
-        </select>
-      </td>
-      <td><input type="text" class="rename mono" data-idx="${idx}" value="${suggestRename(c.destPath)}" disabled></td>
-    `;
-    tbody.appendChild(tr);
-  });
-
-  // ✅ 這裡就夠了：在函式內、用到同一個 tbody 變數
-  tbody.querySelectorAll("select.decision").forEach(sel => {
-    sel.addEventListener("change", e => {
-      const i = Number(e.target.getAttribute("data-idx"));
-      const input = tbody.querySelector(`input.rename[data-idx="${i}"]`);
-      input.disabled = (e.target.value !== "Rename");
-    });
-  });
-}
-
-
-
-    
-    
-    function formatTime(t) {
-    if (!t) return "-";
-    const d = new Date(t);                 // 後端回來是 ISO（UTC），這裡轉本地
-    return d.toLocaleString("zh-TW", { hour12: false });
-    }
-  function suggestRename(destPath) {
-    const idx = destPath.lastIndexOf(".");
-    if (idx <= 0) return destPath + ".copy";
-    const name = destPath.slice(0, idx);
-    const ext  = destPath.slice(idx);
-    return `${name}.copy${ext}`;
-    }
-
-  $("btnAllOverwrite").addEventListener("click", () => {
-    document.querySelectorAll("select.decision").forEach(s => { s.value = "Overwrite"; s.dispatchEvent(new Event("change")); });
-  });
-  $("btnAllSkip").addEventListener("click", () => {
-    document.querySelectorAll("select.decision").forEach(s => { s.value = "Skip"; s.dispatchEvent(new Event("change")); });
-  });
-
-  $("dlgClose").addEventListener("click", hideDialog);
-  $("btnDlgCancel").addEventListener("click", hideDialog);
-
-  $("btnDlgConfirm").addEventListener("click", async () => {
-    // 蒐集使用者對「衝突項目」的決策
-    const decisions = lastConflicts.map((c, idx) => {
-      const sel = document.querySelector(`select.decision[data-idx="${idx}"]`);
-      const action = sel ? sel.value : "Overwrite";
-      const rn = document.querySelector(`input.rename[data-idx="${idx}"]`);
-      return {
-        sourcePath: c.sourcePath,
-        destPath: c.destPath,
-        destId: c.destId,
-        decision: action,
-        renameTo: action === "Rename" ? rn.value : null
+      es.onopen = () => {
+        $status.textContent = '（已連線進度事件）';
       };
-    });
 
-    // 將「不在衝突清單內」的項目，自動視為 Overwrite（照原路徑搬）
-    const conflictKeys = new Set(lastConflicts.map(c => `${c.destId}|${c.destPath}`.toLowerCase()));
-    lastNormalizedItems.forEach(it => {
-      const key = `${it.destId}|${it.destPath}`.toLowerCase();
-      if (!conflictKeys.has(key)) {
-        decisions.push({
-          sourcePath: it.sourcePath,
-          destPath: it.destPath,
-          destId: it.destId,
-          decision: "Overwrite",
-          renameTo: null
-        });
-      }
-    });
-
-    // 送 /api/move/batch/resolved
-    const jobId = $("jobId").value.trim();
-    try {
-      const r = await fetch(`/api/move/batch/resolved`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId, items: decisions })
-      });
-      if (!r.ok) throw new Error("resolved api not ok");
-
-      hideDialog();
-      setMsg(`任務已送出：${jobId}（開始輪詢進度）`, "ok");
-
-      if (pollTimer) clearInterval(pollTimer);
-      await poll(jobId);
-      pollTimer = setInterval(() => poll(jobId), 500);
-      $("btnStop").disabled = false;
-    } catch (e) {
-      console.error(e);
-      setMsg("送出任務失敗（resolved）", "err");
-    }
-  });
-
-  // ====== 主按鈕：先預檢，必要時彈窗 ======
-  $("btnStart").addEventListener("click", async () => {
-    const jobId = $("jobId").value.trim();
-    if (!jobId) { setMsg("請先輸入 Job Id", "err"); return; }
-
-    let body;
-    try {
-      body = JSON.parse($("payload").value);
-      body.jobId = jobId;
-    } catch {
-      setMsg("Payload 必須是合法 JSON", "err");
-      return;
+      es.onerror = () => {
+        $status.textContent = '（進度事件斷線，重試中…）';
+        try { es.close(); } catch {}
+        setTimeout(connect, 1500);
+      };
     }
 
-    setMsg("預檢中…");
-    $("btnStart").disabled = true;
-
-    try {
-      const pre = await fetch(`/api/move/precheck`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      if (!pre.ok) throw new Error("precheck api not ok");
-      const pj = await pre.json();
-
-      lastNormalizedItems = pj.normalizedItems || [];
-      lastConflicts = pj.conflicts || [];
-
-      if (lastConflicts.length === 0) {
-        // 無衝突：直接預設 Overwrite 全送
-        const decisions = lastNormalizedItems.map(it => ({
-          sourcePath: it.sourcePath,
-          destPath: it.destPath,
-          destId: it.destId,
-          decision: "Overwrite",
-          renameTo: null
-        }));
-
-        const r = await fetch(`/api/move/batch/resolved`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId, items: decisions })
-        });
-        if (!r.ok) throw new Error("resolved api not ok");
-        setMsg(`任務已送出：${jobId}（開始輪詢進度）`, "ok");
-
-        if (pollTimer) clearInterval(pollTimer);
-        await poll(jobId);
-        pollTimer = setInterval(() => poll(jobId), 500);
-        $("btnStop").disabled = false;
-      } else {
-        // 有衝突：建立表格，彈出對話框讓使用者選
-        buildConflictRows(lastConflicts);
-        showDialog();
-        setMsg(`偵測到 ${lastConflicts.length} 個衝突，請選擇處理方式。`, "muted");
-      }
-    } catch (e) {
-      console.error(e);
-      setMsg("送出任務失敗（precheck）", "err");
-    } finally {
-      $("btnStart").disabled = false;
-    }
+    connect();
+  }
+    // ★ 新增：查看歷史紀錄按鈕 → 開新分頁到 history.html
+  $btnHistory.addEventListener('click', () => {
+   window.location.href='history.html';
   });
-
-  $("btnStop").addEventListener("click", () => {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
-    $("btnStop").disabled = true;
-    setMsg("已停止輪詢", "muted");
+  $btnRestore.addEventListener('click', () => {
+    window.location.href='restore.html';
   });
+  $btnReload.addEventListener('click', loadPending);
+  $selGroup.addEventListener('change', renderTable);  // ★ 切換樓層時重畫
+
+  loadPending();
+  startProgressListener();
 </script>
+
 </body>
 </html>
+

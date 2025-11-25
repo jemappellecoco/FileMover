@@ -61,7 +61,12 @@ public class JobsController : ControllerBase
                 // 新增：任務類型給前端顯示/過濾用
                 TaskKind    = kind,                // "move" 或 "delete"
                 RequestedBy = x.RequestedBy ?? "-", // 誰發的
-                 SourceGroup = x.FromGroup
+                 SourceGroup = x.FromGroup,
+                 // ⭐ 新增：讓前端知道現在是 0 / 1 / 24 / 27 / -1
+                Status      = x.FileStatus,
+                Tag = (x.FileStatus == 24 || x.FileStatus == 27)
+                ? "回遷任務"
+                : null
             };
         });
 
@@ -102,6 +107,82 @@ public class JobsController : ControllerBase
 
         return Ok(data);
     }
+// Phase2：列出等待回遷
+// Controllers/JobsController.cs
+
+[HttpGet("phase2-pending")]
+public async Task<IActionResult> GetPhase2Pending(
+    [FromQuery] int take = 200,
+    CancellationToken ct = default)
+{
+    if (take <= 0) take = 200;
+    if (take > 500) take = 500;
+
+    var rows = await _repo.ListPhase2PendingAsync(take, ct);
+
+    // ⭐ 從 DB 先查出 7F / 4F 的 RESTORE「名稱」
+    var restore7F = await _repo.GetRestoreNameAsync("7F", ct);  // group = 7F, type = RESTORE
+    var restore4F = await _repo.GetRestoreNameAsync("4F", ct);  // group = 4F, type = RESTORE
+
+    var data = rows.Select(x =>
+    {
+        // ⭐ 顯示用來源名稱：
+        // 14 → 顯示「7F 的 RESTORE 名稱」
+        // 17 → 顯示「4F 的 RESTORE 名稱」
+        // 其他 → 顯示原本 FromName
+        string sourceName = x.FileStatus switch
+        {
+            14 => restore7F ?? x.FromName ?? "",
+            17 => restore4F ?? x.FromName ?? "",
+            _  => x.FromName ?? ""
+        };
+
+        return new
+        {
+            x.HistoryId,
+            x.FileId,
+            x.FromStorageId,
+            x.ToStorageId,
+
+            ProgramName = string.IsNullOrWhiteSpace(x.UserBit) ? x.FileName : x.UserBit,
+            FileName    = x.UserBit ?? x.FileName,
+
+            // ✅ 給 HTML 顯示的：只用「名稱」，不是路徑
+            SourceStorage = sourceName,       // ← 這就是你說的「找到的 name」
+            DestStorage   = x.ToName ?? "",   // 目的地一樣顯示 storage_name
+
+            // ✅ 下面兩個只是給搬運程式用，前端不要拿來顯示就好
+            SourcePath  = x.FullSourcePath,   // 實際路徑（不顯示）
+            DestPath    = x.FullDestPath,     // 實際路徑（不顯示）
+
+            RequestedBy = x.RequestedBy ?? "-",
+            FileStatus  = x.FileStatus
+        };
+    });
+
+    return Ok(data);
+}
+
+
+// Phase2：啟動回遷（把選到的變成 status=0）
+public sealed class Phase2StartRequest
+{
+    public List<int> HistoryIds { get; init; } = new();
+}
+
+[HttpPost("phase2/start")]
+public async Task<IActionResult> StartPhase2(
+    [FromBody] Phase2StartRequest req,
+    CancellationToken ct = default)
+{
+    if (req.HistoryIds == null || req.HistoryIds.Count == 0)
+        return BadRequest(new { message = "請至少勾選一筆回遷任務" });
+
+    await _repo.MarkPhase2ToReadyAsync(req.HistoryIds.ToArray(), ct);
+
+    return Ok(new { count = req.HistoryIds.Count, message = "已送出回遷，稍後由背景服務處理" });
+}
+
 
     // 支援兩種命名：srcPath/dstPath 與 sourcePath/destObjectPath
     public sealed class CreateJobRequest

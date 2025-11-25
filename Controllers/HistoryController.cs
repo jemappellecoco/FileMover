@@ -58,6 +58,7 @@ namespace FileMoverWeb.Controllers
                     12  => "刪除成功",
                     91  => "搬移失敗（其他）",
                     92  => "刪除失敗（其他）",
+                    14 or 17 => "等待回遷",
                     911 => "搬移失敗－找不到來源/檔案不存在",
                     912 => "搬移失敗－檔案使用中",
                     913 => "搬移失敗－權限不足",
@@ -71,6 +72,25 @@ namespace FileMoverWeb.Controllers
 
             return Ok(data);
         }
+
+        [HttpPost("{id:int}/retry")]
+            public async Task<IActionResult> Retry(int id, CancellationToken ct)
+            {
+                var ok = await _repo.RetryAsync(id, ct);
+                if (!ok)
+                {
+                    return BadRequest(new
+                    {
+                        message = "此筆紀錄目前不能重試（可能不是錯誤狀態或已被處理）。"
+                    });
+                }
+
+                return Ok(new
+                {
+                    historyId = id,
+                    message = "已將此筆任務重新排入佇列。"
+                });
+            }
     }
 
 }
