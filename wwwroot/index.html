@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>搬運系統</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <!-- 標題 + Tabs -->
+  <h1>
+    <span id="pageTitle">📂 待搬任務清單</span>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="pending">待搬任務</button>
+      <button class="tab-btn" data-tab="restore">回遷清單</button>
+      <button class="tab-btn" data-tab="history">搬運歷史</button>
+    </div>
+  </h1>
+  <span id="statusLine"></span>
+
+  <!-- 內容區：只留空容器，實際內容交給各 JS 模組塞 -->
+  <main>
+    <section id="page-pending" class="page active">
+      <div id="pending-root"></div>
+    </section>
+
+    <section id="page-restore" class="page">
+      <div id="restore-root"></div>
+    </section>
+
+    <section id="page-history" class="page">
+      <div id="history-root"></div>
+    </section>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

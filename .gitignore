@@ -1,0 +1,19 @@
+# Build outputs
+bin/
+obj/
+
+# Publish folders (for ASP.NET / Console apps)
+**/publish/
+publish/
+
+# Visual Studio / Rider cache
+.vs/
+*.user
+*.suo
+
+# Logs and temp
+*.log
+*.tmp
+
+# SQLite, PID files
+startup/

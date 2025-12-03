@@ -1,0 +1,8 @@
+{
+  "Host": "127.0.0.1",
+  "Port": 2211,
+  "Username": "coco",
+  "Password": "123",
+  "UseTLS": false,
+  "RemotePath": "/"
+}

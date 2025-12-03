@@ -1,0 +1,9 @@
+通常是 .NET 8 Runtime（看你 publish 用什麼版本）
+
+下載網址：
+https://dotnet.microsoft.com/en-us/download/dotnet/8.0
+
+裝「ASP.NET Core Runtime」就可以。
+
+
+dotnet publish -c Release -o ./publish

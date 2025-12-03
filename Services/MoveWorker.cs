@@ -1,0 +1,561 @@
+// Services/MoveWorker.cs
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Collections.Concurrent;
+using FileMoverWeb.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
+
+namespace FileMoverWeb.Services
+{
+    public sealed class MoveWorker
+    {
+        private readonly IJobProgress _progress;
+        private readonly ILogger<MoveWorker> _logger;
+        private readonly IConfiguration _cfg;   // ⭐ 真的存下來，RunAsync 要用
+
+        // ===== 調整參數（視環境可微調） =====
+        private const int REPORT_INTERVAL_MS = 300;               // 至少每 300ms 回報一次
+        private const long REPORT_BYTES_STEP = 4L * 1024 * 1024;  // 或每累積 ≥ 4 MB 回報
+        private readonly ICancelStore _cancelStore;
+        public MoveWorker(IJobProgress progress, ILogger<MoveWorker> logger, IConfiguration cfg, ICancelStore cancelStore)
+            {
+                _progress = progress;
+                _logger = logger;
+                _cfg = cfg;
+                _cancelStore = cancelStore;
+            }
+
+        /// <summary>
+        /// 執行一個搬運批次，回傳每筆結果。
+        /// </summary>
+        public Task<List<MoveResult>> RunAsync(MoveBatchRequest req, CancellationToken ct = default)
+            => RunAsync(req, onItemDone: null, ct);
+
+        /// <summary>
+        /// 執行一個搬運批次，回傳每筆結果，並可在每筆完成時回呼 onItemDone。
+        /// </summary>
+        public async Task<List<MoveResult>> RunAsync(
+            MoveBatchRequest req,
+            Func<MoveResult, Task>? onItemDone,
+            CancellationToken ct = default)
+        {
+            if (req is null) throw new ArgumentNullException(nameof(req));
+            if (req.Items is null || req.Items.Count == 0) return new List<MoveResult>(0);
+
+            // ⭐ 每一批都從 dynamic-config 讀最新的並行數
+            var max = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+            if (max <= 0) max = 1;
+            _logger.LogInformation("MoveWorker RunAsync with max parallel = {max}", max);
+
+            using var destLimiter = new SemaphoreSlim(max, max);
+
+            // 1) 預估總量（按 DestId 彙總），避免中途才知道總大小
+            var totals = req.Items
+                .GroupBy(i => i.DestId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Sum(i =>
+                    {
+                        try
+                        {
+                            var fi = new FileInfo(i.SourcePath);
+                            return fi.Exists ? fi.Length : 0L;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "無法讀取檔案大小：{Src}", i.SourcePath);
+                            return 0L;
+                        }
+                    }),
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            _progress.InitTotals(req.JobId, totals);
+
+            // 2) 依 DestId 分組處理（同一 Dest 串行，不同 Dest 受限度並行）
+            var destGroups = req.Items
+                .GroupBy(i => i.DestId, StringComparer.OrdinalIgnoreCase)
+                .Select(g => (destId: g.Key, items: g.ToList()))
+                .ToList();
+
+            var results = new ConcurrentBag<MoveResult>();
+            var tasks = destGroups.Select(async g =>
+            {
+                await destLimiter.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    await MoveGroupAsync(
+                        req.JobId,
+                        g.destId,
+                        g.items,
+                        results,
+                        onItemDone,
+                        ct
+                    ).ConfigureAwait(false);
+                }
+                finally
+                {
+                    destLimiter.Release();
+                }
+            });
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            return results.ToList();
+        }
+    
+/// <summary>
+/// 同一個 DestId 共用一個 progress job
+/// </summary>
+private async Task MoveGroupAsync(
+    string jobId,
+    string destId,
+    List<MoveItem> items,
+    ConcurrentBag<MoveResult> results,
+    Func<MoveResult, Task>? onItemDone,
+    CancellationToken ct)
+{
+    foreach (var item in items)
+    {
+        ct.ThrowIfCancellationRequested();
+        var histId = item.HistoryId ?? 0;
+        if (_cancelStore.ShouldCancel(item.HistoryId ?? 0))
+        {
+            results.Add(new MoveResult {
+                HistoryId = item.HistoryId ?? 0,
+                Success = false,
+                StatusCode = 999,
+                Error = "Canceled by user"
+            });
+
+            _cancelStore.Clear(item.HistoryId ?? 0);
+
+            if (onItemDone != null)
+                await onItemDone(results.Last());
+
+            continue; // 跳過，不搬
+        }
+        Console.WriteLine($"[MOVE] job={jobId}, historyId={item.HistoryId}, src={item.SourcePath}");
+
+        MoveResult result;
+
+        try
+        {
+            // 路徑拼不出來（多半是沒 FileData / 沒 UserBit） → 911
+            if (string.IsNullOrWhiteSpace(item.SourcePath))
+            {
+                _logger.LogWarning(
+                    "[{Job}] Source path empty (HistoryId={HistoryId})，多半是缺 FileData/UserBit。",
+                    jobId, item.HistoryId);
+
+                result = new MoveResult
+                {
+                    HistoryId  = item.HistoryId ?? 0,
+                    Success    = false,
+                    StatusCode = 911,
+                    Error      = "Source path empty (no FileData/UserBit)"
+                };
+            }
+            // 911：來源不存在
+            else if (!File.Exists(item.SourcePath))
+            {
+                _logger.LogWarning("[{Job}] Source not found: {Src}", jobId, item.SourcePath);
+
+                result = new MoveResult
+                {
+                    HistoryId  = item.HistoryId ?? 0,
+                    Success    = false,
+                    StatusCode = 911,
+                    Error      = $"Source not found: {item.SourcePath}"
+                };
+            }
+            
+
+
+           else
+                {
+                    // 先讓前端知道目前在處理哪一個檔案（進度條上會顯示檔名）
+                    _progress.SetCurrentFile(
+                        jobId,
+                        destId,
+                        Path.GetFileName(item.SourcePath) ?? item.SourcePath);
+
+                    // ★ 在真正搬檔之前，確認來源檔案大小是否穩定
+                    var stable = await WaitFileSizeStableAsync(
+                        item.SourcePath,
+                        probes: 3,
+                        intervalMs: 800,
+                        ct: ct);
+
+                    if (!stable)
+                    {
+                        // 檔案大小仍在變化 → 視為正在寫入 / 使用中，不搬
+                        _logger.LogWarning(
+                            "[{Job}] Source file still changing, skip move: {Src}",
+                            jobId, item.SourcePath);
+
+                        result = new MoveResult
+                        {
+                            HistoryId  = item.HistoryId ?? 0,
+                            Success    = false,
+                            StatusCode = 912,  // 跟檔案使用中一樣，用 912 表示
+                            Error      = "Source file still changing (size not stable)"
+                        };
+                    }
+                    else
+                    {
+                        // ✅ 檔案穩定了，才開始真正搬
+                        var dstPath = NormalizeDestPath(item.SourcePath, item.DestPath);
+
+                        await CopyFileAsync(jobId, destId, item.SourcePath, dstPath, histId,ct)
+    .ConfigureAwait(false);
+
+                        result = new MoveResult
+                        {
+                            HistoryId  = item.HistoryId ?? 0,
+                            Success    = true,
+                            StatusCode = 11,
+                            Error      = null
+                        };
+                    }
+                }
+                }
+        catch (OperationCanceledException ex)
+        {
+            // 👇 這邊用 Warning 就好，代表是使用者要求的中止
+            _logger.LogWarning(ex, "[{Job}] 搬運已被使用者取消：{Src}", jobId, item.SourcePath);
+
+            result = new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 999,                 // ⭐ 關鍵：用 999 表示「使用者取消」
+                Error      = "Canceled by user"
+            };
+        }
+        catch (IOException ex) when (IsSharingOrLockViolation(ex))   // 912
+        {
+            _logger.LogWarning(ex, "[{Job}] 檔案使用中（搬移失敗）：{Src}", jobId, item.SourcePath);
+            result = new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 912,
+                Error      = ex.Message
+            };
+        }
+        catch (DirectoryNotFoundException ex)                       // 914
+        {
+            _logger.LogWarning(ex, "[{Job}] 目的地路徑不存在（搬移失敗）：{Src}", jobId, item.SourcePath);
+            result = new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 914,
+                Error      = ex.Message
+            };
+        }
+        catch (UnauthorizedAccessException ex)                       // 913
+        {
+            _logger.LogWarning(ex, "[{Job}] 權限不足（搬移失敗）：{Src}", jobId, item.SourcePath);
+            result = new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 913,
+                Error      = ex.Message
+            };
+        }
+        catch (Exception ex)                                        // 91
+        {
+            _logger.LogError(ex, "[{Job}] 搬運失敗：{Src}", jobId, item.SourcePath);
+            result = new MoveResult
+            {
+                HistoryId  = item.HistoryId ?? 0,
+                Success    = false,
+                StatusCode = 91,
+                Error      = ex.Message
+            };
+        }
+
+        // ⭐ 不管成功/失敗，都統一在這裡加入 results + 呼叫 callback
+        results.Add(result);
+        if (onItemDone != null)
+        {
+            await onItemDone(result).ConfigureAwait(false);
+        }
+    }
+}
+    /// <summary>
+/// 檔案大小在固定時間內維持不變才視為「穩定」
+/// 例：probes=3, intervalMs=800 → 約 1.6 秒內都沒有變化
+/// </summary>
+private static async Task<bool> WaitFileSizeStableAsync(
+    string path,
+    int probes = 3,
+    int intervalMs = 800,
+    CancellationToken ct = default)
+{
+    if (string.IsNullOrWhiteSpace(path))
+        return false;
+
+    if (!File.Exists(path))
+        return false;
+
+    long? lastSize = null;
+
+    for (int i = 0; i < probes; i++)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        long size;
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists)
+                return false;
+
+            size = fi.Length;
+        }
+        catch
+        {
+            // 讀不到大小就當作不穩定
+            return false;
+        }
+
+        if (lastSize.HasValue && size != lastSize.Value)
+        {
+            // 任兩次量測不一致 → 視為正在變化
+            return false;
+        }
+
+        lastSize = size;
+
+        // 最後一次不用再等
+        if (i < probes - 1)
+            await Task.Delay(intervalMs, ct).ConfigureAwait(false);
+    }
+
+    return true;
+}
+
+
+
+
+
+
+        /// <summary>
+        /// 將單一檔案以暫存檔寫入 → 最後 Replace/Move 成目的檔（含進度回報、重試退避）。
+        /// </summary>
+        private async Task CopyFileAsync(string jobId, string destId, string srcPath, string dstPath,int historyId, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(srcPath))
+                throw new ArgumentException("SourcePath 不能為空白", nameof(srcPath));
+            if (string.IsNullOrWhiteSpace(dstPath))
+                throw new ArgumentException("DestPath 不能為空白", nameof(dstPath));
+
+            var destDir = Path.GetDirectoryName(dstPath)
+                        ?? throw new InvalidOperationException($"DestPath 無法取得目錄：{dstPath}");
+            
+            // 暫存檔放在目的目錄（避免跨磁碟 move）
+            var tmpPath = Path.Combine(destDir, $".~{Path.GetFileName(dstPath)}.{Guid.NewGuid():N}.part");
+
+            Directory.CreateDirectory(destDir);
+            await CleanupTempFiles(destDir, ct).ConfigureAwait(false);  // 再清理舊的 .part
+            long srcSize = 0;                  // ★ 記下來源大小，等等核對
+            try
+            {
+                using var inFs = new FileStream(
+                srcPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                useAsync: true);
+
+            srcSize = inFs.Length;         // ★ 讀取來源檔大小
+
+            // ⭐ 這裡把「這個 HistoryId 的 Job」初始化 total bytes
+            // jobId = 呼叫者傳進來的 progId（HistoryId 字串）
+            // destId = 也是 progId（前端就可以用 historyId 當 data-to）
+            // _progress.InitTotals(jobId, new Dictionary<string, long>
+            // {
+            //     [destId] = srcSize
+            // });
+
+            using var outFs = new FileStream(
+                tmpPath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                useAsync: true);
+
+
+
+                var buffer = new byte[1024 * 1024];
+                int read;
+                long sinceLastReport = 0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                while ((read = await inFs.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                {
+                    if (_cancelStore.ShouldCancel(historyId))
+                    throw new OperationCanceledException("Canceled by user");
+                    await outFs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    sinceLastReport += read;
+
+                    bool timeOk = sw.ElapsedMilliseconds >= REPORT_INTERVAL_MS;
+                    bool bytesOk = sinceLastReport >= REPORT_BYTES_STEP;
+
+                    if (timeOk || bytesOk)
+                    {
+                        _progress.AddCopied(jobId, destId, sinceLastReport);
+                        sinceLastReport = 0;
+                        sw.Restart();
+                    }
+                }
+
+                if (sinceLastReport > 0)
+                    _progress.AddCopied(jobId, destId, sinceLastReport);
+
+                await outFs.FlushAsync(ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 寫入失敗時往外丟，finally 會清除暫存檔
+                throw;
+            }
+            finally
+            {
+                // outFs 會先被 using 處置，再進行 Replace/Move
+            }
+
+            // 原子取代（若目的檔被佔用則退避重試）
+            await RetryReplaceAsync(tmpPath, dstPath, ct).ConfigureAwait(false);
+
+            // 清理殘留暫存檔（正常情況下 Replace/Move 後應不存在）
+            try
+            {
+                if (File.Exists(tmpPath))
+                    File.Delete(tmpPath);
+            }
+            catch { /* 忽略清理失敗 */ }
+
+            // // ★ 搬完後刪除來源：先核對目的檔大小一致再刪
+            // try
+            // {
+            //     var dstInfo = new FileInfo(dstPath);
+            //     if (dstInfo.Exists && dstInfo.Length == srcSize)
+            //     {
+            //         File.Delete(srcPath);      // ✅ 確認成功才刪來源
+            //     }
+            //     // 若大小不一致就保留來源，交由重試/人工處理
+            // }
+            // catch
+            // {
+            //     // 刪除來源失敗不影響搬運成果（例如權限/鎖定），安全忽略或之後再處理
+            // }
+        }
+
+        // 清理目的資料夾裡「舊的」暫存檔 .~xxx.part
+        private async Task CleanupTempFiles(string destDir, CancellationToken ct = default)
+        {
+            if (string.IsNullOrWhiteSpace(destDir) || !Directory.Exists(destDir))
+                return;
+
+            var files = Directory.GetFiles(destDir, ".~*.part", SearchOption.TopDirectoryOnly);
+            foreach (var file in files)
+            {
+                try
+                {
+                    var fi = new FileInfo(file);
+                    long size1 = fi.Length;
+
+                    // 等 0.5 秒再檢查一次（避免誤刪正在使用中的 temp）
+                    await Task.Delay(500, ct);
+
+                    fi.Refresh();
+                    long size2 = fi.Length;
+
+                    // 檔案沒有增長 → 表示沒有寫入活動 → 刪除
+                    if (size1 == size2)
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch
+                {
+                    // 忽略失敗
+                }
+            }
+        }
+
+
+        // ===== Helpers =====
+
+        private static string NormalizeDestPath(string srcPath, string destPath)
+        {
+            if (string.IsNullOrWhiteSpace(destPath))
+                throw new ArgumentException("destPath 不能為空白", nameof(destPath));
+
+            bool looksDir =
+                Directory.Exists(destPath) ||
+                destPath.EndsWith("\\", StringComparison.Ordinal) ||
+                destPath.EndsWith("/",  StringComparison.Ordinal);
+
+            if (looksDir)
+            {
+                var fileName = Path.GetFileName(srcPath);
+                destPath = Path.Combine(destPath, fileName);
+            }
+
+            return destPath;
+        }
+
+        private static bool IsSharingOrLockViolation(IOException ex)
+        {
+            // 32: ERROR_SHARING_VIOLATION, 33: ERROR_LOCK_VIOLATION
+            int code = ex.HResult & 0xFFFF;
+            return code == 32 || code == 33;
+        }
+
+        private async Task RetryReplaceAsync(string tmpPath, string dstPath, CancellationToken ct, int maxRetries = 10)
+        {
+            var delay = TimeSpan.FromMilliseconds(200);
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                try
+                {
+                    if (File.Exists(dstPath))
+                    {
+                        File.Replace(tmpPath, dstPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                    }
+                    else
+                    {
+                        File.Move(tmpPath, dstPath);
+                    }
+                    return; // 成功
+                }
+                catch (IOException ex) when (IsSharingOrLockViolation(ex))
+                {
+                    // 目的檔被占用 → 指數退避重試
+                    _logger.LogWarning("Replace/Move 重試 {Attempt}/{Max}：{Dst} 被佔用", attempt, maxRetries, dstPath);
+                    await Task.Delay(delay, ct).ConfigureAwait(false);
+                    var next = Math.Min(delay.TotalMilliseconds * 1.8, 3000); // 上限 3 秒
+                    delay = TimeSpan.FromMilliseconds(next);
+                }
+            }
+
+            throw new IOException($"目的檔仍被佔用，無法取代：{dstPath}");
+        }
+    }
+}
