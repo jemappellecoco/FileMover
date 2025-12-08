@@ -7,9 +7,10 @@ using System.Threading.Tasks;
 using System.Data.Common;
 using System.IO;                 // for Path.Combine
 using Dapper;
+
 using System.Data.SqlClient; 
 using Microsoft.Extensions.Configuration;
-
+using Microsoft.Extensions.DependencyInjection;
 namespace FileMoverWeb.Services
 {
     #region DTOs
@@ -466,7 +467,7 @@ WHERE h.id IN @ids;",
 /// - file_status = 1 且 update_time 超過 retryMinutes 視為「卡住，需重試」
 /// ✅ 加上應用程式層級鎖，避免多個 slot 互搶造成死結 / 重複領取
 /// </summary>
-        public async Task<HistoryTask?> ClaimCopyTopOneAsync(
+public async Task<HistoryTask?> ClaimCopyTopOneAsync(
     int retryMinutes,
     string? group,
     CancellationToken ct)
@@ -520,11 +521,10 @@ WHERE h.action = 'copy'
     WHERE
             h.action = 'copy'
         AND (@group IS NULL OR s_from.set_group = @group)
-        AND (
-                h.file_status = 0
-            OR (h.file_status = 1
-                AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
-            )
+        AND h.file_status IN (
+            0,    800      -- 新任務
+            
+        )
     ORDER BY 
         ISNULL(h.priority, 1) DESC,
         h.create_time ASC,
@@ -551,7 +551,7 @@ LEFT JOIN dbo.FileData   f      ON f.id      = h.file_id
 JOIN dbo.Storage         s_from ON s_from.id = h.from_storage_id
 LEFT JOIN dbo.Storage    s_to   ON s_to.id   = h.to_storage_id
 JOIN P ON P.id = h.id;",
-                new { retryMin = retryMinutes, group },
+                new {  group },
                 transaction: tran,
                 cancellationToken: ct));
 
@@ -642,7 +642,7 @@ WHERE id = @historyId;";
         /// <summary>
         /// 歷史紀錄清單（成功＋失敗）
         /// </summary>
-        public async Task<List<HistoryRow>> ListHistoryAsync(string status, int take, CancellationToken ct)
+        public async Task<List<HistoryRow>> ListHistoryAsync(string status, int take, string? group, CancellationToken ct)
         {
             if (take <= 0) take = 200;
 
@@ -679,10 +679,14 @@ WHERE h.file_status IN (
         911,912,913,914,-- 搬移失敗細項
         921,922,923     -- 刪除失敗細項
     )
+    AND (
+        @group IS NULL
+        OR s_from.set_group = @group
+    )
 ORDER BY h.update_time DESC, h.id DESC;";
 
             var rows = await conn.QueryAsync<HistoryRow>(
-                new CommandDefinition(sql, new { n = take }, cancellationToken: ct));
+                new CommandDefinition(sql, new { n = take,group }, cancellationToken: ct));
 
             return rows.ToList();
         }
@@ -977,7 +981,7 @@ WHERE id = @id
   AND file_status IN (
         91, 92, 999,901, 902,903,        -- 失敗（其他）
         911, 912, 913, 914,  -- 搬移失敗細項
-        921, 922, 923 ,       -- 刪除失敗細項
+        921, 922, 923        -- 刪除失敗細項
     );";
 
             var affected = await conn.ExecuteAsync(
@@ -1015,5 +1019,22 @@ WHERE id = @id;";
 
             return newPri;
         }
+
+// 重啟的時候 我要撿回1->0
+        public async Task ResetRunningJobsAsync(CancellationToken ct)
+            {
+                using var conn = _factory.Create();
+
+                const string sql = @"
+            UPDATE dbo.FileData_History
+            SET file_status = 0,
+                update_time = GETDATE()
+            WHERE file_status = 1;   -- 將未完成的作業重置回待處理
+            ";
+
+                await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+            }
+
     }
+    
 }

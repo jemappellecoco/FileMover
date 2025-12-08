@@ -4,7 +4,7 @@ const API_HISTORY = '/history';
 export function initHistory(root) {
   root.innerHTML = `
     <div class="toolbar">
-      <label>狀態：
+      <!--<label>狀態：
         <select id="selHistStatus">
           <option value="all">全部</option>
           <optgroup label="搬移 Move">
@@ -31,7 +31,25 @@ export function initHistory(root) {
             <option value="903">未設定restore (903)</option>
           </optgroup>
         </select>
+      </label>-->
+    <label>狀態：
+  <select id="selHistStatus">
+    <option value="all">全部</option>
+    <option value="success">成功</option>
+    <option value="fail">失敗</option>
+  </select>
+</label>
+
+    <!-- ⭐ 新增：樓層濾器（只有 history 頁用） -->
+      <label style="margin-left:12px;">
+        樓層：
+        <select id="selHistGroup">
+          <option value="all">全部</option>
+          <option value="4F">4F</option>
+          <option value="7F">7F</option>
+        </select>
       </label>
+
 
       <label>顯示筆數：
         <input id="inpHistTake" type="number" min="10" step="10" value="200" style="width:100px;">
@@ -65,6 +83,7 @@ export function initHistory(root) {
   `;
 
   const $selStatus = root.querySelector('#selHistStatus');
+  const $selGroup  = root.querySelector('#selHistGroup'); 
   const $inpTake   = root.querySelector('#inpHistTake');
   const $inpSearch = root.querySelector('#inpHistSearch');
   const $btnReload = root.querySelector('#btnHistReload');
@@ -106,18 +125,21 @@ export function initHistory(root) {
     return String(code ?? '');
   }
 
-  function pill(label) {
+  function pill(label, tooltip) {
+    const safeTip = tooltip
+      ? String(tooltip).replace(/"/g, '&quot;')
+      : '';
+
+    let cls = 'status-pill';
+
     if (label.includes('成功'))
-      return `<span class="status-pill ok">${label}</span>`;
+      cls += ' ok';
+    else if (label.includes('失敗') || label.includes('取消') || label.includes('錯誤'))
+      cls += ' fail';
+    else if (label.includes('等待') || label.includes('未設定restore錯誤'))
+      cls += ' pending';
 
-    if (label.includes('失敗') || label.includes('取消')|| label.includes('錯誤'))
-      return `<span class="status-pill fail">${label}</span>`;
-
-    if (label.includes('等待'))
-      return `<span class="status-pill pending">${label}</span>`;
-    if (label.includes('未設定restore錯誤'))
-      return `<span class="status-pill pending">${label}</span>`;
-    return `<span class="status-pill">${label}</span>`;
+    return `<span class="${cls}" title="${safeTip}">${label}</span>`;
   }
 
   function renderRows(rows) {
@@ -131,7 +153,10 @@ export function initHistory(root) {
 
     const frag = document.createDocumentFragment();
     rows.forEach((r, idx) => {
-      const label = statusLabel(r.status);
+      const label   = statusLabel(r.status); // pill 上顯示的「大分類」：成功 / 搬移失敗 / 刪除失敗...
+      const detail  = r.statusText || label; // 後端傳來的詳細說明
+      const tooltip = `${r.status} - ${detail}`; // 例如：912 - 搬移失敗－檔案使用中
+
       const canRetry = isErrorStatus(r.status);
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -141,12 +166,13 @@ export function initHistory(root) {
         <td>${r.sourceStorage || ''}</td>
         <td>${r.destStorage || ''}</td>
         <td>${fmtDate(r.updateTime)}</td>
-        <td>${pill(label)}
-         ${canRetry ? `<button class="btn-retry" data-id="${r.historyId}" style="margin-left:6px;padding:2px 8px;font-size:12px;">重試</button>` : ''}
+        <td>${pill(label, tooltip)}
+        ${canRetry ? `<button class="btn-retry" data-id="${r.historyId}" style="margin-left:6px;padding:2px 8px;font-size:12px;">重試</button>` : ''}
         </td>
       `;
       frag.appendChild(tr);
     });
+
     $tbody.innerHTML = '';
     $tbody.appendChild(frag);
     $count.textContent = rows.length + ' 筆';
@@ -160,9 +186,26 @@ export function initHistory(root) {
 
     let rows = allRows;
 
+    // if (st !== 'all') {
+    //   rows = rows.filter(r => String(r.status) === st);
+    // }
     if (st !== 'all') {
-      rows = rows.filter(r => String(r.status) === st);
+      if (st === 'success') {
+        // 成功：搬移成功 + 刪除成功
+        rows = rows.filter(r => r.status === 11 || r.status === 12);
+      } else if (st === 'fail') {
+        // 失敗：所有錯誤 & 取消
+        const failCodes = [
+          91, 92,              // 其他失敗
+          901, 902, 903,       // DB / restore 設定錯誤
+          911, 912, 913, 914,  // 搬移失敗細項
+          921, 922, 923,       // 刪除失敗細項
+          999                  // 使用者取消
+        ];
+        rows = rows.filter(r => failCodes.includes(r.status));
+      }
     }
+
 
     if (kw) {
       rows = rows.filter(r => ((r.fileName || '').toLowerCase().includes(kw)));
@@ -194,8 +237,14 @@ export function initHistory(root) {
 
     const take = parseInt($inpTake.value || '200', 10) || 200;
 
+   const group = $selGroup ? ($selGroup.value || 'all') : 'all';
+
     try {
-      const resp = await fetch(`${API_HISTORY}?take=${take}&ts=${Date.now()}`, { cache:'no-store' });
+      const resp = await fetch(
+        `${API_HISTORY}?take=${take}&group=${encodeURIComponent(group)}&ts=${Date.now()}`,
+        { cache:'no-store' }
+      );
+      // const resp = await fetch(`${API_HISTORY}?take=${take}&ts=${Date.now()}`, { cache:'no-store' });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const rows = await resp.json();
       allRows = Array.isArray(rows) ? rows : [];
@@ -223,7 +272,7 @@ export function initHistory(root) {
     const historyId = Number(btn.dataset.id);
     if (!historyId) return;
 
-    if (!confirm(`確定要重試這筆任務（HistoryId = ${historyId}）嗎？`)) return;
+    if (!confirm(`確定要重試這筆任務嗎？`)) return;
 
     try {
       const resp = await fetch(`/history/${historyId}/retry`, { method: 'POST' });
@@ -239,16 +288,48 @@ export function initHistory(root) {
   });
 
   // === 事件綁定 ===
-  $btnReload.addEventListener('click', () => loadHistory(false));
+  $btnReload.addEventListener('click', () => {
+  if ($inpSearch) $inpSearch.value = '';   // 清除搜尋字
+  // 如果狀態也想一併重置，可以加：
+  // if ($selStatus) $selStatus.value = 'all';
+
+  lastRenderSignature = '';               // 強迫重畫
+  loadHistory(false);
+});
   $selStatus.addEventListener('change', () => filterAndRender(true));
   $inpTake.addEventListener('change', () => loadHistory(false));
   $inpSearch.addEventListener('input', () => filterAndRender(true));
-
+  // ⭐ 樓層變更：重新打 API（而不是只前端 filter）
+  if ($selGroup) {
+    $selGroup.addEventListener('change', () => {
+      lastRenderSignature = '';   // 換樓層當成新畫面
+      loadHistory(false);
+    });
+  }
+   
   // 第一次載入：正常模式（會顯示載入中）
   loadHistory(false);
-
+  
   // tab 切換時：正常 reload 一次
-  window.addEventListener('history-reload', () => loadHistory(false));
+  window.addEventListener('history-reload', () => {
+  // 清除搜尋字
+  if ($inpSearch) $inpSearch.value = '';
+
+  // 狀態 → 回到「全部」
+  if ($selStatus) $selStatus.value = 'all';
+
+  // 顯示筆數 → 回到 200
+  if ($inpTake) $inpTake.value = '200';
+
+  // 樓層 → 回到「全部」
+  if ($selGroup) $selGroup.value = 'all';
+
+  // 強迫重畫
+  lastRenderSignature = '';
+
+  // 重新載入
+  loadHistory(false);
+});
 
   // ⭐ 每 5 秒靜默刷新：不清空畫面，只有有變化才重畫
   setInterval(() => loadHistory(true), 5000);

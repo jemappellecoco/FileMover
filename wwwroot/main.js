@@ -28,28 +28,6 @@ const inited = {
   history: false,
 };
 
-// tab 切換
-// tabButtons.forEach(btn => {
-//   btn.addEventListener('click', () => {
-//     const tab = btn.dataset.tab;
-//     if (!tab) return;
-
-//     // UI 狀態
-//     tabButtons.forEach(b => b.classList.toggle('active', b === btn));
-//     Object.keys(pages).forEach(k => {
-//       pages[k].classList.toggle('active', k === tab);
-//     });
-//     pageTitle.textContent = titles[tab];
-
-//     // 第一次打開時，lazy-import 對應 JS
-//     if (!inited[tab]) {
-//       if (tab === 'pending') initPendingTab();
-//       if (tab === 'restore') initRestoreTab();
-//       if (tab === 'history') initHistoryTab();
-//       inited[tab] = true;
-//     }
-//   });
-// });
 tabButtons.forEach(btn => {
   btn.addEventListener('click', async () => {
     const tab = btn.dataset.tab;

@@ -33,7 +33,7 @@ namespace FileMoverWeb.Services
         private readonly IConfiguration _cfg;
 
         private const int MaxMoveAttempts = 3;
-
+        private int _lastEnabledSlots = -1;
         private readonly IJobProgress _progress;
         private readonly IMoveRetryStore _retryStore;
 
@@ -85,10 +85,18 @@ namespace FileMoverWeb.Services
                 }
 
     // ⭐ slot 數量 = GlobalMaxConcurrentMoves
-    int slotCount = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+    // int slotCount = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+    // ⭐ 初始 slot 數量：依照 GlobalMaxConcurrentMoves 來開
+    const int MaxSlots = 10;   // 只是上限，用來 clamp
 
+  
+    int slotCount = MaxSlots;
+    // 從配置讀取當前啟用的數量，僅用於 Log 輸出
+    var initialEnabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+    if (initialEnabledSlots < 1) initialEnabledSlots = 1;
+    if (initialEnabledSlots > MaxSlots) initialEnabledSlots = MaxSlots;
     _log.LogInformation(
-        "HistoryWatchService starting: group={group}, RESTORE={restoreId}, slots={slots}, interval={interval}s, retryMin={retryMin}",
+        "HistoryWatchService starting: group={group}, RESTORE={restoreId}, initialSlots={slots}, interval={interval}s, retryMin={retryMin}",
         group,
         restoreId?.ToString() ?? "(none)",
         slotCount,
@@ -138,8 +146,25 @@ namespace FileMoverWeb.Services
                     using var scope = _sp.CreateScope();
                     var repo  = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
                     var mover = scope.ServiceProvider.GetRequiredService<MoveWorker>();
+                    var enabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+                    if (enabledSlots < 1) enabledSlots = 1;
+                    if (enabledSlots > 10) enabledSlots = 10;
 
+                    // 只在「值改變」的那一瞬間印一次
+                    if (enabledSlots != _lastEnabledSlots)
+                    {
+                        _lastEnabledSlots = enabledSlots;
+                        _log.LogInformation("Concurrency changed: enabledSlots = {enabledSlots}", enabledSlots);
+}
+                    
                     // ① Phase2 回遷任務優先
+                   // ⭐ slotIndex 超過可用並行數 → 此 slot 休息
+                    if (slotIndex >= enabledSlots)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(idleIntervalSeconds), ct);
+                        continue;
+                    }
+                   
                     var phase2Task = await repo.ClaimPhase2TopOneAsync(group, ct);
                     if (phase2Task != null)
                     {
@@ -152,6 +177,7 @@ namespace FileMoverWeb.Services
                                 slotIndex, phase2Task.HistoryId, msg);
 
                             await repo.FailAsync(phase2Task.HistoryId, 903, msg, ct);
+                            await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
                             continue;
                         }
 
@@ -204,6 +230,7 @@ namespace FileMoverWeb.Services
                                 restorePath,       //  ← 可直接傳
                                 ct);
                         }
+                        await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
                         continue;
                     }
 
@@ -278,56 +305,60 @@ namespace FileMoverWeb.Services
 
             _log.LogInformation("[{hid}] SAME-FLOOR move from {from} to {to}", t.HistoryId, src, dst);
 
+           
             await mover.RunAsync(
-                req,
-                onItemDone: async r =>
-                {
-                    if (r.HistoryId == 0)
-                        return;
+    req,
+        onItemDone: async r =>
+        {
+            if (r.HistoryId == 0)
+                return;
 
-                    if (r.Success)
-                    {
-                        await repo.CompleteAsync(r.HistoryId, ct);
-                        _log.LogInformation("[{hid}] Move success", r.HistoryId);
-                        _retryStore.Clear(r.HistoryId);
-                    }
-                    else
-                    {
-                        var code = r.StatusCode.HasValue
-                            ? r.StatusCode.Value
-                            : MapMoveErrorCode(r.Error);
-                     // ⭐ 新增：如果是 999（使用者取消），就不 retry、不 FailAsync
-                        if (code == 999)
-                        {
-                            _log.LogInformation(
-                                "[{hid}] Move canceled by user (code=999), no retry.",
-                                r.HistoryId);
+            if (r.Success)
+            {
+                await repo.CompleteAsync(r.HistoryId, ct);
+                _log.LogInformation("[{hid}] Move success", r.HistoryId);
+                _retryStore.Clear(r.HistoryId);
+                return;
+            }
 
-                            // 這個 historyId 的 retry 紀錄清掉
-                            _retryStore.Clear(r.HistoryId);
+            // ❌ 搬移失敗
+            var code = r.StatusCode.HasValue
+                ? r.StatusCode.Value
+                : MapMoveErrorCode(r.Error);
 
-                            // DB 狀態 999 已經由 /jobs/{id}/cancel-hard 寫入了，就讓它維持 999
-                            return;
-                        }
-                        var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+            // 999 = 使用者取消 → 不再 retry，也不覆蓋狀態
+            if (code == 999)
+            {
+                _log.LogInformation(
+                    "[{hid}] Move canceled by user (code=999), no retry.",
+                    r.HistoryId);
 
-                        if (failCount >= MaxMoveAttempts)
-                        {
-                            await repo.FailAsync(r.HistoryId, code, r.Error, ct);
-                            _log.LogWarning(
-                                "[{hid}] Move failed ({code}) {fail}/{max}, give up and mark error.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                            _retryStore.Clear(r.HistoryId);
-                        }
-                        else
-                        {
-                            _log.LogWarning(
-                                "[{hid}] Move failed ({code}) {fail}/{max}, will retry later.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                        }
-                    }
-                },
-                ct: ct);
+                _retryStore.Clear(r.HistoryId);
+                return;
+            }
+
+        var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+
+        if (failCount >= MaxMoveAttempts)
+        {
+            // 第三次：寫 9xx，放棄
+            await repo.FailAsync(r.HistoryId, code, r.Error, ct);
+            _log.LogWarning(
+                "[{hid}] Move failed ({code}) {fail}/{max}, give up and mark error.",
+                r.HistoryId, code, failCount, MaxMoveAttempts);
+            _retryStore.Clear(r.HistoryId);
+        }
+        else
+        {
+            // 第 1、2 次：一樣寫 9xx，之後會被 ClaimCopyTopOneAsync 當「待重試」撿回來
+            await repo.FailAsync(r.HistoryId, 800, r.Error, ct);
+            _log.LogWarning(
+                "[{hid}] Move failed ({code}) {fail}/{max}, will retry later.",
+                r.HistoryId, code, failCount, MaxMoveAttempts);
+        }
+    },
+    ct: ct);
+
         }
 
         /// <summary>
@@ -374,52 +405,69 @@ namespace FileMoverWeb.Services
                 "[{hid}] CROSS-FLOOR Phase1: {fromGroup} -> RESTORE({restoreId}), {src} -> {dst}",
                 t.HistoryId, t.FromGroup, restoreId, src, dst);
 
-            await mover.RunAsync(
-                req,
-                onItemDone: async r =>
-                {
-                    if (r.HistoryId == 0)
-                        return;
+          await mover.RunAsync(
+    req,
+    onItemDone: async r =>
+    {
+        if (r.HistoryId == 0)
+            return;
 
-                    if (r.Success)
-                    {
-                        var statusCode = string.Equals(group, "4F", StringComparison.OrdinalIgnoreCase)
-                            ? 14
-                            : 17;
+        if (r.Success)
+        {
+            var statusCode = string.Equals(group, "4F", StringComparison.OrdinalIgnoreCase)
+                ? 14
+                : 17;
 
-                        await repo.MarkPhase1DoneAsync(r.HistoryId, statusCode, ct);
+            await repo.MarkPhase1DoneAsync(r.HistoryId, statusCode, ct);
 
-                        _log.LogInformation(
-                            "[{hid}] CROSS-FLOOR Phase1 success: status={status}",
-                            r.HistoryId, statusCode);
+            _log.LogInformation(
+                "[{hid}] CROSS-FLOOR Phase1 success: status={status}",
+                r.HistoryId, statusCode);
 
-                        _retryStore.Clear(r.HistoryId);
-                    }
-                    else
-                    {
-                        var code = r.StatusCode.HasValue
-                            ? r.StatusCode.Value
-                            : MapMoveErrorCode(r.Error);
+            _retryStore.Clear(r.HistoryId);
+            return;
+        }
 
-                        var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+        // ❌ 失敗
+        var code = r.StatusCode.HasValue
+            ? r.StatusCode.Value
+            : MapMoveErrorCode(r.Error);
 
-                        if (failCount >= MaxMoveAttempts)
-                        {
-                            await repo.FailAsync(r.HistoryId, code, r.Error, ct);
-                            _log.LogWarning(
-                                "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, give up and mark error.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                            _retryStore.Clear(r.HistoryId);
-                        }
-                        else
-                        {
-                            _log.LogWarning(
-                                "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, will retry later.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                        }
-                    }
-                },
-                ct: ct);
+        // 999 = 使用者取消 → 不 retry、不改 DB 狀態
+        if (code == 999)
+        {
+            _log.LogInformation(
+                "[{hid}] CROSS-FLOOR Phase1 canceled by user (code=999), no retry.",
+                r.HistoryId);
+
+            _retryStore.Clear(r.HistoryId);
+            return;
+        }
+
+        var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+
+        if (failCount >= MaxMoveAttempts)
+        {
+            // 最後一次：寫真正錯誤碼 9xx
+            await repo.FailAsync(r.HistoryId, code, r.Error, ct);
+            _log.LogWarning(
+                "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, give up and mark error.",
+                r.HistoryId, code, failCount, MaxMoveAttempts);
+
+            _retryStore.Clear(r.HistoryId);
+        }
+        else
+        {
+            // 第 1、2 次：寫 800，之後再撿回來 retry
+            await repo.FailAsync(r.HistoryId, 800, r.Error, ct);
+            _log.LogWarning(
+                "[{hid}] CROSS-FLOOR Phase1 failed ({code}) {fail}/{max}, will retry later.",
+                r.HistoryId, code, failCount, MaxMoveAttempts);
+        }
+    },
+    ct: ct);
+
+
         }
 
         /// <summary>
@@ -466,42 +514,51 @@ namespace FileMoverWeb.Services
                 t.HistoryId, restoreId, t.ToPath, src, dst);
 
             await mover.RunAsync(
-                req,
-                onItemDone: async r =>
+            req,
+            onItemDone: async r =>
+            {
+                if (r.HistoryId == 0)
+                    return;
+
+                if (r.Success)
                 {
-                    if (r.HistoryId == 0)
-                        return;
+                    await repo.CompleteAsync(r.HistoryId, ct);
+                    _log.LogInformation("[{hid}] PHASE2 restore success", r.HistoryId);
+                    _retryStore.Clear(r.HistoryId);
+                    return;
+                }
 
-                    if (r.Success)
-                    {
-                        await repo.CompleteAsync(r.HistoryId, ct);
-                        _log.LogInformation("[{hid}] PHASE2 restore success", r.HistoryId);
-                        _retryStore.Clear(r.HistoryId);
-                    }
-                    else
-                    {
-                        var code = r.StatusCode.HasValue
-                            ? r.StatusCode.Value
-                            : MapMoveErrorCode(r.Error);
+                var code = r.StatusCode.HasValue
+                    ? r.StatusCode.Value
+                    : MapMoveErrorCode(r.Error);
 
-                        var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+                if (code == 999)
+                {
+                    _log.LogInformation(
+                        "[{hid}] PHASE2 restore canceled by user (code=999), no retry.",
+                        r.HistoryId);
+                    _retryStore.Clear(r.HistoryId);
+                    return;
+                }
 
-                        if (failCount >= MaxMoveAttempts)
-                        {
-                            await repo.FailAsync(r.HistoryId, code, r.Error, ct);
-                            _log.LogWarning(
-                                "[{hid}] PHASE2 restore failed ({code}) {fail}/{max}, give up and mark error.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                            _retryStore.Clear(r.HistoryId);
-                        }
-                        else
-                        {
-                            _log.LogWarning(
-                                "[{hid}] PHASE2 restore failed ({code}) {fail}/{max}, will retry later.",
-                                r.HistoryId, code, failCount, MaxMoveAttempts);
-                        }
-                    }
-                },
+                var failCount = _retryStore.IncrementFail(r.HistoryId, code, r.Error);
+
+                await repo.FailAsync(r.HistoryId, 800, r.Error, ct);
+
+                if (failCount >= MaxMoveAttempts)
+                {
+                    _log.LogWarning(
+                        "[{hid}] PHASE2 restore failed ({code}) {fail}/{max}, give up and mark error.",
+                        r.HistoryId, code, failCount, MaxMoveAttempts);
+                    _retryStore.Clear(r.HistoryId);
+                }
+                else
+                {
+                    _log.LogWarning(
+                        "[{hid}] PHASE2 restore failed ({code}) {fail}/{max}, will retry later.",
+                        r.HistoryId, code, failCount, MaxMoveAttempts);
+                }
+            },
                 ct: ct);
         }
 

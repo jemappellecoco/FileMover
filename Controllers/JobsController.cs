@@ -17,13 +17,14 @@ public class JobsController : ControllerBase
     private readonly MoveWorker _worker;
     private readonly HistoryRepository _repo;
     private readonly IMoveRetryStore _retryStore;
-    public JobsController(IJobProgress progress, MoveWorker worker, HistoryRepository repo,IMoveRetryStore retryStore)
+    private readonly IConfiguration _cfg; 
+    public JobsController(IJobProgress progress, MoveWorker worker, HistoryRepository repo,IMoveRetryStore retryStore,IConfiguration cfg )
     {
         _progress = progress;
         _worker = worker;
         _repo = repo;
         _retryStore = retryStore;
-        
+         _cfg = cfg;
     }
 
     // 0) 列出 status=0/-1/1 的待處理任務：GET /jobs/pending
@@ -79,9 +80,10 @@ public class JobsController : ControllerBase
                 ? "回遷任務"
                 : null,
                 //  新增：給前端顯示「正在重試、第幾次、錯誤原因」
-                RetryCount   = retryCount,
+            RetryCount   = retryCount,
             RetryCode    = retryCode,
-            RetryMessage = retryMessage
+            RetryMessage = retryMessage,
+            
             };
         });
 
@@ -112,8 +114,9 @@ public class JobsController : ControllerBase
         [FromQuery] string status = "all",
         [FromQuery] int take = 200,
         CancellationToken ct = default)
-    {
-        var rows = await _repo.ListHistoryAsync(status, take, ct);
+    {    
+        var group = _cfg.GetValue<string>("FloorRouting:Group");   // e.g. "4F" 或 "7F"
+         var rows = await _repo.ListHistoryAsync(status, take, group, ct);
 
         var data = rows.Select(r => new
         {

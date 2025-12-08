@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-
+using Microsoft.Extensions.Configuration; 
 namespace FileMoverWeb.Controllers
 {
    // Controllers/HistoryController.cs
@@ -14,20 +14,46 @@ namespace FileMoverWeb.Controllers
     public class HistoryController : ControllerBase
     {
         private readonly HistoryRepository _repo;
-        public HistoryController(HistoryRepository repo) { _repo = repo; }
+        private readonly ICancelStore _cancelStore; 
+        private readonly IConfiguration _cfg; 
+         public HistoryController(
+            HistoryRepository repo,
+            ICancelStore cancelStore,
+            IConfiguration cfg          // ⭐ DI 進來
+        )
+        {
+            _repo = repo;
+            _cancelStore = cancelStore;
+            _cfg = cfg;
+        }
 
+        
         // 只顯示成功/失敗（預設 200 筆，可用 take 覆寫）
         [HttpGet]
         public async Task<IActionResult> Get([FromQuery] string status = "all",
                                             [FromQuery] int take = 200,
+                                            [FromQuery] string? group = null,                                  
                                             CancellationToken ct = default)
         {
             if (take <= 0) take = 50;
             if (take > 1000) take = 1000;
-
+            
+            // ⭐ group 解釋：
+            //   - 沒給 / all  → 全部樓層（傳 null 給 repo）
+            //   - current     → 用 FloorRouting:Group（這台代表的樓層）
+            //   - 4F / 7F...  → 直接照字串傳給 repo
+            if (string.IsNullOrWhiteSpace(group) ||
+                group.Equals("all", System.StringComparison.OrdinalIgnoreCase))
+            {
+                group = null;   // 全部
+            }
+            else if (group.Equals("current", System.StringComparison.OrdinalIgnoreCase))
+            {
+                var g = _cfg.GetValue<string>("FloorRouting:Group");
+                group = string.IsNullOrWhiteSpace(g) ? null : g;
+            }
             // 這裡 status = all 時，repo 會只撈 10/90（見上方 whereStatus）
-            var rows = await _repo.ListHistoryAsync(status, take, ct);
-
+            var rows = await _repo.ListHistoryAsync(status, take, group, ct);
             var data = rows.Select(r => new
             {
                 r.HistoryId,
@@ -85,10 +111,10 @@ namespace FileMoverWeb.Controllers
                 {
                     return BadRequest(new
                     {
-                        message = "此筆紀錄目前不能重試（可能不是錯誤狀態或已被處理）。"
+                        message = "此筆紀錄目前不能（可能不是錯誤狀態或已被處理）。"
                     });
                 }
-
+                 _cancelStore.Clear(id);
                 return Ok(new
                 {
                     historyId = id,

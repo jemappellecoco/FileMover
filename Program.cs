@@ -45,6 +45,12 @@ if (watcherEnabled)
     builder.Services.AddHostedService<HistoryWatchService>();
 }
 var app = builder.Build();
+// 🔹🔹🔹 在這裡建立 scope，重置卡住的任務 🔹🔹🔹
+using (var scope = app.Services.CreateScope())
+{
+    var repo = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
+    await repo.ResetRunningJobsAsync(CancellationToken.None);
+}
 
 // Middlewares
 app.UseSwaggerDocumentation();
