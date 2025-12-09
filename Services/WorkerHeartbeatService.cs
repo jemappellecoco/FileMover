@@ -1,0 +1,112 @@
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using Dapper;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace FileMoverWeb.Services
+{
+    /// <summary>
+    /// 每台節點固定寫入/更新 WorkerNode，讓 DB 知道誰在線
+    /// </summary>
+    public sealed class WorkerHeartbeatService : BackgroundService
+    {
+        private readonly DbConnectionFactory _factory;
+        private readonly IConfiguration _cfg;
+        private readonly ILogger<WorkerHeartbeatService> _logger;
+
+        public WorkerHeartbeatService(
+            DbConnectionFactory factory,
+            IConfiguration cfg,
+            ILogger<WorkerHeartbeatService> logger)
+        {
+            _factory = factory;
+            _cfg = cfg;
+            _logger = logger;
+        }
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            var nodeName = _cfg["Cluster:NodeName"] ?? "Unknown";
+            var role     = _cfg["Cluster:Role"]     ?? "Slave";
+            var group    = _cfg["Cluster:Group"]    ?? "";
+            var hostName = Dns.GetHostName();
+            var ip       = ResolveLocalIp() ?? "";
+
+            _logger.LogInformation("WorkerHeartbeatService started for node {Node}", nodeName);
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    // 先用設定檔的 MaxConcurrency
+                    var maxConc = int.Parse(_cfg["Cluster:MaxConcurrency"] ?? "1");
+
+                    // 之後可改成 MoveWorker 那邊提供當前 running 數
+                    var currentRunning = 0;
+
+                    using var conn = _factory.Create();
+
+                    const string sql = @"
+IF EXISTS (SELECT 1 FROM dbo.WorkerNode WHERE NodeName = @NodeName)
+BEGIN
+    UPDATE dbo.WorkerNode
+    SET Role           = @Role,
+        GroupCode      = @GroupCode,
+        MaxConcurrency = @MaxConcurrency,
+        CurrentRunning = @CurrentRunning,
+        LastHeartbeat  = SYSDATETIME(),
+        HostName       = @HostName,
+        IpAddress      = @IpAddress
+    WHERE NodeName = @NodeName;
+END
+ELSE
+BEGIN
+    INSERT INTO dbo.WorkerNode
+        (NodeName, Role, GroupCode, MaxConcurrency, CurrentRunning, LastHeartbeat, HostName, IpAddress)
+    VALUES
+        (@NodeName, @Role, @GroupCode, @MaxConcurrency, @CurrentRunning, SYSDATETIME(), @HostName, @IpAddress);
+END
+";
+
+                    await conn.ExecuteAsync(sql, new
+                    {
+                        NodeName = nodeName,
+                        Role = role,
+                        GroupCode = group,
+                        MaxConcurrency = maxConc,
+                        CurrentRunning = currentRunning,
+                        HostName = hostName,
+                        IpAddress = ip
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Heartbeat failed for node");
+                }
+
+                // 心跳間隔 5 秒，可調
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            }
+        }
+
+        private static string? ResolveLocalIp()
+        {
+            try
+            {
+                var host = Dns.GetHostEntry(Dns.GetHostName());
+                foreach (var ip in host.AddressList)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork)
+                        return ip.ToString();
+                }
+            }
+            catch { }
+            return null;
+        }
+    }
+}

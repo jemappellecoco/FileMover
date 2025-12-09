@@ -36,7 +36,7 @@ builder.Services.AddCors(opt =>
 });
 builder.Services.AddSingleton<DbConnectionFactory>();
 builder.Services.AddScoped<HistoryRepository>();
-
+builder.Services.AddHostedService<WorkerHeartbeatService>();
 // builder.Services.AddHostedService<HistoryWatchService>();
 // 加這段：用設定控制是否啟動背景搬運
 var watcherEnabled = builder.Configuration.GetValue("Watcher:Enabled", false);

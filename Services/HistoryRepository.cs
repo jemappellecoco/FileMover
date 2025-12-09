@@ -810,6 +810,7 @@ WHERE h.action = 'delete'
     AND (@group IS NULL OR s_from.set_group = @group)
     AND (
             h.file_status = -1
+              OR h.file_status = 800
          OR (h.file_status = 1
              AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
         )
@@ -865,19 +866,29 @@ WHERE h.id = @id;",
 
             const string sql = @"
 DECLARE @now DATETIME = GETDATE();
+DECLARE @fid INT;
+DECLARE @sid INT;
 
--- 1) 更新 History：刪除成功
+-- 找到 file_id 和來源 storage_id
+SELECT 
+    @fid = file_id,
+    @sid = from_storage_id
+FROM dbo.FileData_History
+WHERE id = @historyId;
+
+
+-- 1) 更新 History：刪除成功 = 12
 UPDATE dbo.FileData_History
 SET file_status = '12',
     update_time = @now
 WHERE id = @historyId;
 
--- 2) 從 FileData_Storage 移除這顆 storage 上的紀錄
-DELETE s
-FROM dbo.FileData_Storage s
-JOIN dbo.FileData_History h ON h.file_id = s.file_id
-WHERE h.id = @historyId
-  AND s.storage_id = h.from_storage_id;";
+
+-- 2) 直接移除來源 storage row
+DELETE FROM dbo.FileData_Storage
+WHERE file_id = @fid
+  AND storage_id = @sid;
+";
 
             await conn.ExecuteAsync(
                 new CommandDefinition(sql, new { historyId }, cancellationToken: ct));
@@ -1021,20 +1032,27 @@ WHERE id = @id;";
         }
 
 // 重啟的時候 我要撿回1->0
-        public async Task ResetRunningJobsAsync(CancellationToken ct)
+        // 重啟的時候，把「進行中」的工作撿回來：
+// - copy 任務：1 → 0
+// - delete 任務：1 → -1
+            public async Task ResetRunningJobsAsync(CancellationToken ct)
             {
                 using var conn = _factory.Create();
 
                 const string sql = @"
             UPDATE dbo.FileData_History
-            SET file_status = 0,
+            SET 
+                file_status = CASE 
+                    WHEN action = 'delete' THEN -1   -- 刪除任務：回到 -1（待刪除）
+                    ELSE 0                           -- 其他（目前就是 copy）：回到 0（待搬移）
+                END,
                 update_time = GETDATE()
-            WHERE file_status = 1;   -- 將未完成的作業重置回待處理
+            WHERE file_status = 1
+            AND action IN ('copy', 'delete');      -- 只處理這兩種任務
             ";
 
                 await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
             }
-
     }
     
 }

@@ -581,7 +581,7 @@ namespace FileMoverWeb.Services
             {
                 if (!File.Exists(src))
                 {
-                    _log.LogWarning("[{hid}] Delete failed (921: not found): {path}", t.HistoryId, src);
+                    _log.LogWarning("[{hid}] Delete failed (921) File not found: {path}", t.HistoryId, src);
                     await repo.FailDeleteAsync(t.HistoryId, 921, "File not found when deleting", ct);
                     _progress.CompleteJob(jobId);
                     return;
@@ -630,27 +630,88 @@ namespace FileMoverWeb.Services
                 }
 
                 File.Delete(src);
-                _log.LogInformation("[{hid}] Deleted file: {path}", t.HistoryId, src);
+        _log.LogInformation("[{hid}] Delete success: {path}", t.HistoryId, src);
 
-                _progress.CompleteJob(jobId);
-                await repo.CompleteDeleteAsync(t.HistoryId, ct);
-            }
+        await repo.CompleteDeleteAsync(t.HistoryId, ct);
+        _retryStore.Clear(t.HistoryId);
+    }
             catch (IOException ex)
             {
-                _log.LogWarning(ex, "[{hid}] Delete failed (922: in use): {path}", t.HistoryId, src);
-                await repo.FailDeleteAsync(t.HistoryId, 922, ex.Message, ct);
-                _progress.CompleteJob(jobId);
+                // ⭐ 922: 檔案使用中 → 可重試
+                int realCode = 922;
+                var failCount = _retryStore.IncrementFail(t.HistoryId, realCode, ex.Message);
+
+                if (failCount >= MaxMoveAttempts)
+                {
+                    // 最後一次：寫真正錯誤碼 922
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (922) {fail}/{max}, give up: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, realCode, ex.Message, ct);
+                    _retryStore.Clear(t.HistoryId);
+                }
+                else
+                {
+                    // 前幾次：寫 800，之後再撿回來 retry
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (922) {fail}/{max}, will retry later: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, 800, ex.Message, ct);
+                }
             }
             catch (UnauthorizedAccessException ex)
             {
-                _log.LogWarning(ex, "[{hid}] Delete failed (923: access denied): {path}", t.HistoryId, src);
-                await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, ct);
-                _progress.CompleteJob(jobId);
+                // ⭐ 923: 權限/其他 → 也可以重試幾次（看你習慣）
+                int realCode = 923;
+                var failCount = _retryStore.IncrementFail(t.HistoryId, realCode, ex.Message);
+
+                if (failCount >= MaxMoveAttempts)
+                {
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (923) {fail}/{max}, give up: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, realCode, ex.Message, ct);
+                    _retryStore.Clear(t.HistoryId);
+                }
+                else
+                {
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (923) {fail}/{max}, will retry later: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, 800, ex.Message, ct);
+                }
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "[{hid}] Delete failed (923: other): {path}", t.HistoryId, src);
-                await repo.FailDeleteAsync(t.HistoryId, 923, ex.Message, ct);
+                // 其他一律當 923 類型處理
+                int realCode = 923;
+                var failCount = _retryStore.IncrementFail(t.HistoryId, realCode, ex.Message);
+
+                if (failCount >= MaxMoveAttempts)
+                {
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (923-other) {fail}/{max}, give up: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, realCode, ex.Message, ct);
+                    _retryStore.Clear(t.HistoryId);
+                }
+                else
+                {
+                    _log.LogWarning(ex,
+                        "[{hid}] Delete failed (923-other) {fail}/{max}, will retry later: {path}",
+                        t.HistoryId, failCount, MaxMoveAttempts, src);
+
+                    await repo.FailDeleteAsync(t.HistoryId, 800, ex.Message, ct);
+                }
+            }
+            finally
+            {
+                // ⭐ 不管成功/失敗，這個 delete job 一定要收尾
                 _progress.CompleteJob(jobId);
             }
         }
