@@ -11,7 +11,9 @@ using Microsoft.Extensions.DependencyInjection;
 using FileMoverWeb.Models;
 using FileMoverWeb.Services;
 using System.Collections.Generic;
-
+using System.Net.Http;
+using System.Net.Http.Json;
+using Dapper;
 namespace FileMoverWeb.Services
 {
     /// <summary>
@@ -37,6 +39,20 @@ namespace FileMoverWeb.Services
         private readonly IJobProgress _progress;
         private readonly IMoveRetryStore _retryStore;
 
+        private const int MaxSlots = 10;   // 上限，用來 clamp
+
+        // Heartbeat / 節點資訊
+        private readonly HttpClient _http = new();
+        private readonly string _nodeName;
+        private readonly string _nodeGroup;
+        private readonly string _role;
+        private readonly int _maxConcurrencyConfigured;
+        private readonly int _heartbeatIntervalSec;
+        private readonly string? _masterBaseUrl;
+
+        // 目前正在執行中的 slot 數量（所有 slot 加總）
+        private int _currentRunningSlots;
+
         public HistoryWatchService(
             ILogger<HistoryWatchService> log,
             IServiceProvider sp,
@@ -49,10 +65,73 @@ namespace FileMoverWeb.Services
             _cfg = cfg;
             _progress = progress;
             _retryStore = retryStore;
+            // ⭐ 從 appsettings 讀節點資訊
+            _nodeName = _cfg["Cluster:NodeName"] ?? Environment.MachineName;
+            _nodeGroup = _cfg["FloorRouting:Group"] ?? _cfg["Cluster:Group"] ?? "";
+            _role = _cfg["Cluster:Role"] ?? "Worker";
+
+            _maxConcurrencyConfigured = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+            if (_maxConcurrencyConfigured < 1) _maxConcurrencyConfigured = 1;
+            if (_maxConcurrencyConfigured > MaxSlots) _maxConcurrencyConfigured = MaxSlots;
+
+            // ⭐ 心跳頻率（秒），預設 5 秒一次
+            _heartbeatIntervalSec = _cfg.GetValue<int>("Cluster:HeartbeatIntervalSeconds", 5);
+
+            // ⭐ 要打到哪一台 Master（例如 http://192.168.30.118:5000）
+            _masterBaseUrl = _cfg["Cluster:MasterBaseUrl"];
         }
+        private async Task<int> GetEnabledSlotsAsync(CancellationToken ct)
+{
+    try
+    {
+        using var scope = _sp.CreateScope();
+        var factory = scope.ServiceProvider.GetRequiredService<DbConnectionFactory>();
+        using var conn = factory.Create();
+
+        const string sql = @"
+SELECT MaxConcurrency
+FROM dbo.WorkerNode
+WHERE NodeName = @NodeName;
+";
+
+        var dbValue = await conn.ExecuteScalarAsync<int?>(sql, new { NodeName = _nodeName });
+
+        // DB 沒這台或 MaxConcurrency = NULL → 用 appsettings 內的預設值
+        var enabled = dbValue ?? _maxConcurrencyConfigured;
+
+        if (enabled < 1) enabled = 1;
+        if (enabled > MaxSlots) enabled = MaxSlots;
+
+        return enabled;
+    }
+    catch (Exception ex)
+    {
+        _log.LogWarning(ex,
+            "GetEnabledSlotsAsync failed, fallback to configured value={configured}",
+            _maxConcurrencyConfigured);
+
+        var fallback = _maxConcurrencyConfigured;
+        if (fallback < 1) fallback = 1;
+        if (fallback > MaxSlots) fallback = MaxSlots;
+        return fallback;
+    }
+}
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
             {
+                // ⭐ 只有 Worker，或允許下去搬的 Master 才啟動這個 service
+                var role            = _cfg["Cluster:Role"] ?? "Slave";
+                var allowMasterWork = _cfg.GetValue<bool>("Cluster:AllowMasterWork", false);
+
+                // ⭐ 只有「這台是 Master 且不允許 Master 搬檔」的時候，才不要啟動
+                if (string.Equals(role, "Master", StringComparison.OrdinalIgnoreCase) &&
+                    !allowMasterWork)
+                {
+                    _log.LogInformation(
+                        "HistoryWatchService not started. Role={role}, AllowMasterWork={allowMasterWork}",
+                        role, allowMasterWork);
+                    return;
+                }
                 var interval = _cfg.GetValue<int>("Watcher:IntervalSeconds", 5);
                 var retryMin = _cfg.GetValue<int>("Watcher:RetryMinutes", 1);
 
@@ -87,14 +166,15 @@ namespace FileMoverWeb.Services
     // ⭐ slot 數量 = GlobalMaxConcurrentMoves
     // int slotCount = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
     // ⭐ 初始 slot 數量：依照 GlobalMaxConcurrentMoves 來開
-    const int MaxSlots = 10;   // 只是上限，用來 clamp
+    // const int MaxSlots = 10;   // 只是上限，用來 clamp
 
   
     int slotCount = MaxSlots;
     // 從配置讀取當前啟用的數量，僅用於 Log 輸出
-    var initialEnabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
-    if (initialEnabledSlots < 1) initialEnabledSlots = 1;
-    if (initialEnabledSlots > MaxSlots) initialEnabledSlots = MaxSlots;
+    // var initialEnabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+    // if (initialEnabledSlots < 1) initialEnabledSlots = 1;
+    // if (initialEnabledSlots > MaxSlots) initialEnabledSlots = 
+    
     _log.LogInformation(
         "HistoryWatchService starting: group={group}, RESTORE={restoreId}, initialSlots={slots}, interval={interval}s, retryMin={retryMin}",
         group,
@@ -113,10 +193,86 @@ namespace FileMoverWeb.Services
             () => SlotLoopAsync(slotIndex, group, retryMin, restoreId, restorePath, interval, stoppingToken),
             stoppingToken));
     }
+    // ⭐ 再開一個 Heartbeat 迴圈（負責回報節點狀態）
+    tasks.Add(Task.Run(
+    () => HeartbeatLoopAsync(stoppingToken),
+    stoppingToken));
 
     await Task.WhenAll(tasks);
 
     _log.LogInformation("HistoryWatchService stopped.");
+}
+/// <summary>
+/// 固定每 _heartbeatIntervalSec 秒送一次節點心跳給 /api/nodes/heartbeat
+/// </summary>
+private async Task HeartbeatLoopAsync(CancellationToken ct)
+{
+    if (_heartbeatIntervalSec <= 0 || string.IsNullOrWhiteSpace(_masterBaseUrl))
+    {
+        _log.LogInformation("Heartbeat disabled: interval={interval}, masterBaseUrl={url}",
+            _heartbeatIntervalSec, _masterBaseUrl ?? "(null)");
+        return;
+    }
+
+    _log.LogInformation("Heartbeat loop started: interval={interval}s, master={url}",
+        _heartbeatIntervalSec, _masterBaseUrl);
+
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            await SendHeartbeatAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Heartbeat loop error");
+        }
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(_heartbeatIntervalSec), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+    }
+
+    _log.LogInformation("Heartbeat loop stopped.");
+}
+
+private async Task SendHeartbeatAsync(CancellationToken ct)
+{
+    var url = _masterBaseUrl!.TrimEnd('/') + "/api/nodes/heartbeat";
+
+    var payload = new
+    {
+        nodeName       = _nodeName,
+        role           = _role,
+        group          = _nodeGroup,
+        // maxConcurrency = await GetEnabledSlotsAsync(ct),
+        currentRunning = Math.Max(0, _currentRunningSlots),
+        hostName       = Environment.MachineName,
+        ipAddress      = "" // 你要的話之後可以真的查 IP
+    };
+
+    try
+    {
+        var resp = await _http.PostAsJsonAsync(url, payload, ct);
+        // 不強制 EnsureSuccess，fail 就算了，下次再試
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogDebug("Heartbeat HTTP failed: {code}", resp.StatusCode);
+        }
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        _log.LogDebug(ex, "Heartbeat send error");
+    }
 }
 
 
@@ -146,10 +302,11 @@ namespace FileMoverWeb.Services
                     using var scope = _sp.CreateScope();
                     var repo  = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
                     var mover = scope.ServiceProvider.GetRequiredService<MoveWorker>();
-                    var enabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
-                    if (enabledSlots < 1) enabledSlots = 1;
-                    if (enabledSlots > 10) enabledSlots = 10;
-
+                    // var enabledSlots = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+                    // if (enabledSlots < 1) enabledSlots = 1;
+                    // if (enabledSlots > 10) enabledSlots = 10;
+                    // var enabledSlots = MaxSlots;
+                    var enabledSlots = await GetEnabledSlotsAsync(ct);
                     // 只在「值改變」的那一瞬間印一次
                     if (enabledSlots != _lastEnabledSlots)
                     {
@@ -165,83 +322,116 @@ namespace FileMoverWeb.Services
                         continue;
                     }
                    
-                    var phase2Task = await repo.ClaimPhase2TopOneAsync(group, ct);
+                   var phase2Task = await repo.ClaimPhase2TopOneAsync(group, ct);
+
                     if (phase2Task != null)
                     {
                         _log.LogInformation("[Slot {slot}] Pick PHASE2 task #{hid}", slotIndex, phase2Task.HistoryId);
-                        // ★ 沒有 RESTORE → 這筆無法處理，標為錯誤
-                        if (!restoreId.HasValue || string.IsNullOrWhiteSpace(restorePath))
-                        {
-                            var msg = $"Group={group} 未設定 RESTORE，無法處理回遷任務（Phase2）。";
-                            _log.LogError("[Slot {slot}] PHASE2 task #{hid} 無法處理：{msg}",
-                                slotIndex, phase2Task.HistoryId, msg);
 
-                            await repo.FailAsync(phase2Task.HistoryId, 903, msg, ct);
-                            await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
-                            continue;
+                        System.Threading.Interlocked.Increment(ref _currentRunningSlots);
+                        try
+                        {
+                            // ★ 沒有 RESTORE → 這筆無法處理，標為錯誤
+                            if (!restoreId.HasValue || string.IsNullOrWhiteSpace(restorePath))
+                            {
+                                var msg = $"Group={group} 未設定 RESTORE，無法處理回遷任務（Phase2）。";
+                                _log.LogError("[Slot {slot}] PHASE2 task #{hid} 無法處理：{msg}",
+                                    slotIndex, phase2Task.HistoryId, msg);
+
+                                await repo.FailAsync(phase2Task.HistoryId, 903, msg, ct);
+                                await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                            }
+                            else
+                            {
+                                // ★ 有 RESTORE → 才能正常執行 Phase2
+                                await RunSinglePhase2Async(
+                                    repo,
+                                    mover,
+                                    phase2Task,
+                                    restoreId.Value,
+                                    restorePath,
+                                    ct);
+                            }
+                        }
+                        finally
+                        {
+                            System.Threading.Interlocked.Decrement(ref _currentRunningSlots);
                         }
 
-                        // ★ 有 RESTORE → 才能正常執行 Phase2
-                        await RunSinglePhase2Async(
-                            repo,
-                            mover,
-                            phase2Task,
-                            restoreId.Value,   // <-- 用 Value
-                            restorePath,       // <-- 字串本來就 nullable 可以直接傳
-                            ct);
                         continue;
                     }
 
+
                     // ② 一般搬移（同層 / 跨層 Phase1）
-                    var moveTask = await repo.ClaimCopyTopOneAsync(retryMin, group, ct);
+                   var moveTask = await repo.ClaimCopyTopOneAsync(retryMin, group, ct);
                     if (moveTask != null)
                     {
                         _log.LogInformation("[Slot {slot}] Pick MOVE task #{hid} (pri={pri})", slotIndex, moveTask.HistoryId, moveTask.Priority);
 
-                        bool sameFloor =
-                            !string.IsNullOrEmpty(moveTask.ToGroup) &&
-                            moveTask.FromGroup != null &&
-                            moveTask.FromGroup.Equals(moveTask.ToGroup, StringComparison.OrdinalIgnoreCase);
+                        System.Threading.Interlocked.Increment(ref _currentRunningSlots);
+                        try
+                        {
+                            bool sameFloor =
+                                !string.IsNullOrEmpty(moveTask.ToGroup) &&
+                                moveTask.FromGroup != null &&
+                                moveTask.FromGroup.Equals(moveTask.ToGroup, StringComparison.OrdinalIgnoreCase);
 
-                        if (sameFloor)
-                        {
-                            await RunSingleSameFloorAsync(repo, mover, moveTask, ct);
-                        }
-                        else
-                        {
-                            // ★ 如果沒有 RESTORE，跨樓層 Phase1 無法執行
-                            if (!restoreId.HasValue || string.IsNullOrWhiteSpace(restorePath))
+                            if (sameFloor)
                             {
-                                var msg = $"Group={group} 未設定 RESTORE，無法處理跨樓層搬移（Phase1）。";
-                                _log.LogError("[Slot {slot}] MOVE task #{hid} 無法處理：{msg}",
-                                    slotIndex, moveTask.HistoryId, msg);
+                                await RunSingleSameFloorAsync(repo, mover, moveTask, ct);
+                            }
+                            else
+                            {
+                                if (!restoreId.HasValue || string.IsNullOrWhiteSpace(restorePath))
+                                {
+                                    var msg = $"Group={group} 未設定 RESTORE，無法處理跨樓層搬移（Phase1）。";
+                                    _log.LogError("[Slot {slot}] MOVE task #{hid} 無法處理：{msg}",
+                                        slotIndex, moveTask.HistoryId, msg);
 
-                                await repo.FailAsync(moveTask.HistoryId, 903, msg, ct);
-                                continue;
+                                    await repo.FailAsync(moveTask.HistoryId, 903, msg, ct);
+                                }
+                                else
+                                {
+                                    await RunSingleCrossFloorPhase1Async(
+                                        repo,
+                                        mover,
+                                        moveTask,
+                                        group,
+                                        restoreId.Value,
+                                        restorePath,
+                                        ct);
+                                }
                             }
 
-                            // ★ 有 RESTORE 才能跑 Phase1
-                            await RunSingleCrossFloorPhase1Async(
-                                repo,
-                                mover,
-                                moveTask,
-                                group,
-                                restoreId.Value,   //  ← 關鍵
-                                restorePath,       //  ← 可直接傳
-                                ct);
+                            await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
                         }
-                        await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                        finally
+                        {
+                            System.Threading.Interlocked.Decrement(ref _currentRunningSlots);
+                        }
+
                         continue;
                     }
 
-                    // ③ 刪除任務
+
                     var deleteTask = await repo.ClaimDeleteTopOneAsync(retryMin, group, ct);
                     if (deleteTask != null)
                     {
                         _log.LogInformation("[Slot {slot}] Pick DELETE task #{hid}", slotIndex, deleteTask.HistoryId);
-                        await RunSingleDeleteAsync(repo, deleteTask, ct);
+
+                        System.Threading.Interlocked.Increment(ref _currentRunningSlots);
+                        try
+                        {
+                            await RunSingleDeleteAsync(repo, deleteTask, ct);
+                        }
+                        finally
+                        {
+                            System.Threading.Interlocked.Decrement(ref _currentRunningSlots);
+                        }
+
                         continue;
                     }
+
 
                     // 三種任務都沒有 → 稍微休息一下
                     await Task.Delay(TimeSpan.FromSeconds(idleIntervalSeconds), ct);

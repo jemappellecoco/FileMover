@@ -83,6 +83,7 @@ public class JobsController : ControllerBase
             RetryCount   = retryCount,
             RetryCode    = retryCode,
             RetryMessage = retryMessage,
+            AssignedNode = x.AssignedNode
             
             };
         });
@@ -135,8 +136,9 @@ public class JobsController : ControllerBase
 
             r.FromStorageId,
             r.ToStorageId,
+            
             r.UpdateTime,
-
+             AssignedNode = r.AssignedNode, 
 
             r.Error
         });

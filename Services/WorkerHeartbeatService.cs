@@ -30,34 +30,32 @@ namespace FileMoverWeb.Services
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+{
+    var nodeName = _cfg["Cluster:NodeName"] ?? "Unknown";
+    var role     = _cfg["Cluster:Role"]     ?? "Slave";
+    var group    = _cfg["Cluster:Group"]    ?? "";
+    var hostName = Dns.GetHostName();
+    var ip       = ResolveLocalIp() ?? "127.0.0.1";
+
+    _logger.LogInformation(
+        "WorkerHeartbeatService started for node {Node}, role={Role}, group={Group}, host={Host}, ip={Ip}",
+        nodeName, role, group, hostName, ip);
+
+    while (!stoppingToken.IsCancellationRequested)
+    {
+        try
         {
-            var nodeName = _cfg["Cluster:NodeName"] ?? "Unknown";
-            var role     = _cfg["Cluster:Role"]     ?? "Slave";
-            var group    = _cfg["Cluster:Group"]    ?? "";
-            var hostName = Dns.GetHostName();
-            var ip       = ResolveLocalIp() ?? "";
+            // ✅ currentRunning 你之後可以改成真的值
+            var currentRunning = 0;
 
-            _logger.LogInformation("WorkerHeartbeatService started for node {Node}", nodeName);
+            using var conn = _factory.Create();
 
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                try
-                {
-                    // 先用設定檔的 MaxConcurrency
-                    var maxConc = int.Parse(_cfg["Cluster:MaxConcurrency"] ?? "1");
-
-                    // 之後可改成 MoveWorker 那邊提供當前 running 數
-                    var currentRunning = 0;
-
-                    using var conn = _factory.Create();
-
-                    const string sql = @"
+            const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.WorkerNode WHERE NodeName = @NodeName)
 BEGIN
     UPDATE dbo.WorkerNode
     SET Role           = @Role,
         GroupCode      = @GroupCode,
-        MaxConcurrency = @MaxConcurrency,
         CurrentRunning = @CurrentRunning,
         LastHeartbeat  = SYSDATETIME(),
         HostName       = @HostName,
@@ -69,30 +67,34 @@ BEGIN
     INSERT INTO dbo.WorkerNode
         (NodeName, Role, GroupCode, MaxConcurrency, CurrentRunning, LastHeartbeat, HostName, IpAddress)
     VALUES
-        (@NodeName, @Role, @GroupCode, @MaxConcurrency, @CurrentRunning, SYSDATETIME(), @HostName, @IpAddress);
+        (@NodeName, @Role, @GroupCode, @InsertMaxConcurrency, @CurrentRunning, SYSDATETIME(), @HostName, @IpAddress);
 END
 ";
 
-                    await conn.ExecuteAsync(sql, new
-                    {
-                        NodeName = nodeName,
-                        Role = role,
-                        GroupCode = group,
-                        MaxConcurrency = maxConc,
-                        CurrentRunning = currentRunning,
-                        HostName = hostName,
-                        IpAddress = ip
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Heartbeat failed for node");
-                }
+            // ✅ 只在「第一次 insert」時給一個預設值（避免 NULL）
+            var insertMaxConc = _cfg.GetValue<int>("GlobalMaxConcurrentMoves", 2);
+            if (insertMaxConc < 1) insertMaxConc = 1;
+            if (insertMaxConc > 10) insertMaxConc = 10;
 
-                // 心跳間隔 5 秒，可調
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-            }
+            await conn.ExecuteAsync(sql, new
+            {
+                NodeName = nodeName,
+                Role = role,
+                GroupCode = group,
+                CurrentRunning = currentRunning,
+                HostName = hostName,
+                IpAddress = ip,
+                InsertMaxConcurrency = insertMaxConc
+            });
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Heartbeat failed for node");
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+    }
+}
 
         private static string? ResolveLocalIp()
         {

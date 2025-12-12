@@ -77,7 +77,9 @@ namespace FileMoverWeb.Controllers
                 r.FromStorageId,
                 r.ToStorageId,
                 r.UpdateTime,
+                AssignedNode = r.AssignedNode, 
                 Status = r.Status,
+                
                 StatusText = r.Status switch
                 {
                     11  => "搬移成功",

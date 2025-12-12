@@ -12,7 +12,66 @@ public sealed class ProgressController : ControllerBase
 {
     private readonly IJobProgress _progress;
     public ProgressController(IJobProgress progress) => _progress = progress;
+    // ===== 以下是「集中回報」給 Master 用的 =====
 
+    public sealed class InitTotalsDto
+    {
+        public string JobId { get; set; } = "";
+        public Dictionary<string, long> TotalsByDest { get; set; } = new();
+    }
+
+    public sealed class SetCurrentFileDto
+    {
+        public string JobId   { get; set; } = "";
+        public string DestId  { get; set; } = "";
+        public string FileName { get; set; } = "";
+        public string? NodeName { get; set; }
+    }
+
+    public sealed class AddCopiedDto
+    {
+        public string JobId  { get; set; } = "";
+        public string DestId { get; set; } = "";
+        public long   DeltaBytes { get; set; }
+        public string? NodeName { get; set; }
+    }
+
+    public sealed class CompleteJobDto
+    {
+        public string JobId { get; set; } = "";
+        public string? NodeName { get; set; }
+    }
+        [HttpPost("report/init")]
+    public IActionResult ReportInit([FromBody] InitTotalsDto dto)
+    {
+        _progress.InitTotals(dto.JobId, dto.TotalsByDest);
+        return Ok();
+    }
+
+    [HttpPost("report/file")]
+    public IActionResult ReportCurrentFile([FromBody] SetCurrentFileDto dto)
+    {
+        // 如果你的 JobProgress 有 SetCurrentFile 就呼叫它
+        if (_progress is JobProgress jp)
+        {
+            jp.SetCurrentFile(dto.JobId, dto.DestId, dto.FileName);
+        }
+        return Ok();
+    }
+
+    [HttpPost("report/delta")]
+    public IActionResult ReportDelta([FromBody] AddCopiedDto dto)
+    {
+        _progress.AddCopied(dto.JobId, dto.DestId, dto.DeltaBytes);
+        return Ok();
+    }
+
+    [HttpPost("report/complete")]
+    public IActionResult ReportComplete([FromBody] CompleteJobDto dto)
+    {
+        _progress.CompleteJob(dto.JobId);
+        return Ok();
+    }
     // 既有：查單一 job 的目標清單（每個目標對應一個 DestId）
     [HttpGet("{jobId}")]
     [Produces("application/json")]

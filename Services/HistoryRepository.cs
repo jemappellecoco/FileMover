@@ -46,7 +46,9 @@ namespace FileMoverWeb.Services
         public string?  RequestedBy { get; set; }          // UserData.username
         public string?  Action      { get; set; }          // FileData_History.action
         public DateTime CreateTime  { get; set; }          // FileData_History.create_time
-
+        
+        // 目前指派給哪個 node
+        public string? AssignedNode { get; set; }          // FileData_History.assigned_node    
         // 目前狀態（0 / 1 / -1 / 24 / 27 / 9xx...）
         public int   FileStatus { get; set; }
         public int?  Priority   { get; set; }
@@ -70,10 +72,13 @@ namespace FileMoverWeb.Services
         private readonly DbConnectionFactory _factory;
         private readonly IConfiguration      _cfg;
         private static readonly SemaphoreSlim _copyClaimLock = new(1, 1);
+        private readonly string? _nodeName;
         public HistoryRepository(DbConnectionFactory factory, IConfiguration cfg)
         {
             _factory = factory;
             _cfg     = cfg;
+             // ⭐ 這台程式實例對應的節點名稱，例如 4F-M1 / 4F-S1
+            _nodeName = _cfg.GetValue<string>("Cluster:NodeName");
         }
 
         /// <summary>
@@ -107,6 +112,7 @@ SELECT TOP (@n)
     u.username           AS RequestedBy,
     h.action             AS Action,
     h.create_time        AS CreateTime,
+    h.assigned_node      AS AssignedNode,
     CAST(h.file_status AS int) AS FileStatus   -- ⭐ 狀態欄
 FROM dbo.FileData_History AS h
 JOIN dbo.FileData       AS f      ON f.id = h.file_id
@@ -115,13 +121,20 @@ LEFT JOIN dbo.Storage   AS s_to   ON s_to.id   = h.to_storage_id
 LEFT JOIN dbo.UserData  AS u      ON u.id = h.user_id
 WHERE 
 (
-    -- Phase1 / 刪除：依來源樓層
-    h.file_status IN (0, 1, -1)
+     -- ⭐ Phase 1：由來源樓層負責的任務
+    -- 包含：
+    --   0   → 新的 copy 任務
+    --   1   → 正在搬移中的任務
+    --  -1   → delete 任務（待刪除）
+    --  800  → copy/delete 需要在本樓層重試的任務
+    h.file_status IN (0, 1, -1, 800)
     AND s_from.set_group = @group
 )
 OR
 (
-    -- Phase2：依 status 決定要給哪一層
+    -- ⭐ Phase 2：跨樓層回遷（RESTORE → 目的地）
+    -- 24 → 4F → 7F 回遷，由 7F 執行
+    -- 27 → 7F → 4F 回遷，由 4F 執行
     (h.file_status = 24 AND @group = '7F')     -- 4F → 7F 回遷
     OR
     (h.file_status = 27 AND @group = '4F')     -- 7F → 4F 回遷
@@ -234,8 +247,8 @@ JOIN T ON T.id = h.id;";
             using var conn = _factory.Create();
             await (conn as DbConnection)!.OpenAsync(ct);
             using var tran = (conn as DbConnection)!.BeginTransaction();
-
-            var ids = await conn.QueryAsync<int>(
+            var nodeName = _nodeName;
+           var ids = await conn.QueryAsync<int>(
                 new CommandDefinition(@"
 ;WITH P AS (
   SELECT TOP (@n) h.id
@@ -245,6 +258,13 @@ JOIN T ON T.id = h.id;";
         h.action = 'copy'
     AND h.file_status IN (24, 27)          -- ⭐ Phase2 待回遷
     AND (@group IS NULL OR s_from.set_group = @group)
+    -- ⭐ Node 篩選：如果有設定 NodeName，就只撿指派給自己或尚未指派的
+    AND (
+          @nodeName IS NULL
+       OR @nodeName = ''
+       OR h.assigned_node IS NULL
+       OR h.assigned_node = @nodeName
+    )
   ORDER BY ISNULL(h.priority, 1) DESC,        -- ⭐ 優先級大的先回遷
         h.update_time ASC,
         h.id ASC
@@ -255,7 +275,9 @@ SET h.file_status = 1,
 OUTPUT inserted.id
 FROM dbo.FileData_History h
 JOIN P ON P.id = h.id;",
-                    new { n = batchSize, group }, transaction: tran, cancellationToken: ct));
+                    new { n = batchSize, group, nodeName },   // ⭐ 記得把 nodeName 傳進去
+            transaction: tran,
+            cancellationToken: ct));
 
             if (!ids.Any())
             {
@@ -293,16 +315,19 @@ WHERE h.id IN @ids;",
         /// <summary>
         /// Phase2（slot 版）：以 TOP 1 領取一筆「回遷任務」，依 priority 排序
         /// </summary>
-        public async Task<HistoryTask?> ClaimPhase2TopOneAsync(
-            string? group,
-            CancellationToken ct)
-        {
-            using var conn = _factory.Create();
-            await (conn as DbConnection)!.OpenAsync(ct);
-            using var tran = (conn as DbConnection)!.BeginTransaction();
+public async Task<HistoryTask?> ClaimPhase2TopOneAsync(
+    string? group,
+    CancellationToken ct)
+{
+    using var conn = _factory.Create();
+    await (conn as DbConnection)!.OpenAsync(ct);
+    using var tran = (conn as DbConnection)!.BeginTransaction();
 
-            var id = await conn.ExecuteScalarAsync<int?>(
-                new CommandDefinition(@"
+    var nodeName      = _nodeName;
+    var useNodeFilter = !string.IsNullOrWhiteSpace(nodeName);
+
+    var id = await conn.ExecuteScalarAsync<int?>(
+        new CommandDefinition(@"
 ;WITH P AS (
   SELECT TOP (1) h.id
   FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
@@ -311,9 +336,14 @@ WHERE h.id IN @ids;",
         h.action = 'copy'
     AND h.file_status IN (24, 27)          -- ⭐ Phase2 待回遷
     AND (@group IS NULL OR s_from.set_group = @group)
-  ORDER BY ISNULL(h.priority, 1) DESC,        -- ⭐ 優先級大的先回遷
-        h.update_time ASC,
-        h.id ASC
+    -- ⭐ 有啟用 Node 篩選 → 只撿 assigned_node = 自己
+    AND (
+      @useNodeFilter = 0
+   OR h.assigned_node = @nodeName
+)
+  ORDER BY ISNULL(h.priority, 1) DESC,
+           h.update_time ASC,
+           h.id ASC
 )
 UPDATE h
 SET h.file_status = 1,
@@ -321,16 +351,18 @@ SET h.file_status = 1,
 OUTPUT inserted.id
 FROM dbo.FileData_History h
 JOIN P ON P.id = h.id;",
-                    new { group }, transaction: tran, cancellationToken: ct));
+            new { group, nodeName, useNodeFilter },
+            transaction: tran,
+            cancellationToken: ct));
 
-            if (!id.HasValue)
-            {
-                tran.Commit();
-                return null;
-            }
+    if (!id.HasValue)
+    {
+        tran.Commit();
+        return null;
+    }
 
-            var task = await conn.QuerySingleOrDefaultAsync<HistoryTask>(
-                new CommandDefinition(@"
+    var task = await conn.QuerySingleOrDefaultAsync<HistoryTask>(
+        new CommandDefinition(@"
 SELECT 
     h.id              AS HistoryId,
     h.file_id         AS FileId,
@@ -350,115 +382,118 @@ LEFT JOIN dbo.FileData   f      ON f.id      = h.file_id
 JOIN dbo.Storage         s_from ON s_from.id = h.from_storage_id
 LEFT JOIN dbo.Storage    s_to   ON s_to.id   = h.to_storage_id
 WHERE h.id = @id;",
-                    new { id }, transaction: tran, cancellationToken: ct));
+            new { id },
+            transaction: tran,
+            cancellationToken: ct));
 
-            tran.Commit();
-            return task;
-        }
+    tran.Commit();
+    return task;
+}
+
 
         /// <summary>
         /// 批次版 Claim（舊的 batch 版本，slot 模式不強制使用）
         /// </summary>
-        public async Task<List<HistoryTask>> ClaimAsync(
-            int batchSize,
-            int retryMinutes,
-            string? group,
-            CancellationToken ct)
-        {
-            using var conn = _factory.Create();
-            await (conn as DbConnection)!.OpenAsync(ct);
-            using var tran = (conn as DbConnection)!.BeginTransaction();
+//         public async Task<List<HistoryTask>> ClaimAsync(
+//             int batchSize,
+//             int retryMinutes,
+//             string? group,
+//             CancellationToken ct)
+//         {
+//             using var conn = _factory.Create();
+//             await (conn as DbConnection)!.OpenAsync(ct);
+//             using var tran = (conn as DbConnection)!.BeginTransaction();
 
-            // 🔹 先標記「來源 StorageId 無效」→ 901
-            await conn.ExecuteAsync(new CommandDefinition(@"
-UPDATE h
-SET h.file_status = 901,
-    h.update_time = GETDATE()
-FROM dbo.FileData_History h
-LEFT JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
-WHERE h.action = 'copy'
-  AND h.file_status IN (0, 1)
-  AND s_from.id IS NULL;      -- 找不到來源 Storage
-",
-                transaction: tran, cancellationToken: ct));
+//             // 🔹 先標記「來源 StorageId 無效」→ 901
+//             await conn.ExecuteAsync(new CommandDefinition(@"
+// UPDATE h
+// SET h.file_status = 901,
+//     h.update_time = GETDATE()
+// FROM dbo.FileData_History h
+// LEFT JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
+// WHERE h.action = 'copy'
+//   AND h.file_status IN (0, 1)
+//   AND s_from.id IS NULL;      -- 找不到來源 Storage
+// ",
+//                 transaction: tran, cancellationToken: ct));
 
-            // 🔹 再標記「目的地 StorageId 無效」→ 902
-            await conn.ExecuteAsync(new CommandDefinition(@"
-UPDATE h
-SET h.file_status = 902,
-    h.update_time = GETDATE()
-FROM dbo.FileData_History h
-JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
-LEFT JOIN dbo.Storage s_to ON s_to.id = h.to_storage_id
-WHERE h.action = 'copy'
-  AND h.file_status IN (0, 1)
-  AND h.to_storage_id IS NOT NULL
-  AND s_to.id IS NULL;        -- 找不到目的地 Storage
-",
-                transaction: tran, cancellationToken: ct));
+//             // 🔹 再標記「目的地 StorageId 無效」→ 902
+//             await conn.ExecuteAsync(new CommandDefinition(@"
+// UPDATE h
+// SET h.file_status = 902,
+//     h.update_time = GETDATE()
+// FROM dbo.FileData_History h
+// JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
+// LEFT JOIN dbo.Storage s_to ON s_to.id = h.to_storage_id
+// WHERE h.action = 'copy'
+//   AND h.file_status IN (0, 1)
+//   AND h.to_storage_id IS NOT NULL
+//   AND s_to.id IS NULL;        -- 找不到目的地 Storage
+// ",
+//                 transaction: tran, cancellationToken: ct));
 
-            var ids = await conn.QueryAsync<int>(
-                new CommandDefinition(@"
-;WITH P AS (
-    SELECT TOP (@n) h.id
-    FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
-    JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id 
-    WHERE
-            -- ✅ 只處理 copy 任務
-            h.action = 'copy'
-        AND (@group IS NULL OR s_from.set_group = @group)
-        AND (
-                -- 新任務
-                h.file_status = 0
-            OR (h.file_status = 1
-                AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
-            )
-    ORDER BY 
-        ISNULL(h.priority, 1) DESC,   -- ⭐ 優先級高的先撿
-        h.create_time ASC,            -- 同優先級才比建立時間
-        h.id ASC
-)
-UPDATE h
-SET h.file_status = 1,
-    h.update_time = GETDATE()
-OUTPUT inserted.id
-FROM dbo.FileData_History h
-JOIN P ON P.id = h.id;",
-                    new { n = batchSize, retryMin = retryMinutes, group },
-                    transaction: tran,
-                    cancellationToken: ct));
+//             var ids = await conn.QueryAsync<int>(
+//                 new CommandDefinition(@"
+// ;WITH P AS (
+//     SELECT TOP (@n) h.id
+//     FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
+//     JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id 
+//     WHERE
+//             -- ✅ 只處理 copy 任務
+//             h.action = 'copy'
+//         AND (@group IS NULL OR s_from.set_group = @group)
+//         AND (
+//                 -- 新任務
+//                 h.file_status = 0
+//             OR (h.file_status = 1
+//                 AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
+//             )
+//     ORDER BY 
+//         ISNULL(h.priority, 1) DESC,   -- ⭐ 優先級高的先撿
+//         h.create_time ASC,            -- 同優先級才比建立時間
+//         h.id ASC
+// )
+// UPDATE h
+// SET h.file_status = 1,
+//     h.update_time = GETDATE()
+// OUTPUT inserted.id
+// FROM dbo.FileData_History h
+// JOIN P ON P.id = h.id;",
+//                     new { n = batchSize, retryMin = retryMinutes, group },
+//                     transaction: tran,
+//                     cancellationToken: ct));
 
-            if (!ids.Any())
-            {
-                tran.Commit();
-                return new();
-            }
+//             if (!ids.Any())
+//             {
+//                 tran.Commit();
+//                 return new();
+//             }
 
-            var tasks = (await conn.QueryAsync<HistoryTask>(
-                new CommandDefinition(@"
-SELECT 
-    h.id              AS HistoryId,
-    h.file_id         AS FileId,
-    h.from_storage_id AS FromStorageId,
-    h.to_storage_id   AS ToStorageId,
-    f.filename        AS FileName,
-    f.UserBit         AS UserBit,
-    s_from.location   AS FromPath,
-    s_to.location     AS ToPath,
-    s_from.set_group  AS FromGroup,
-    s_to.set_group    AS ToGroup,
-    h.priority        AS Priority,
-    CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData
-FROM dbo.FileData_History h
-LEFT JOIN dbo.FileData   f      ON f.id      = h.file_id
-JOIN dbo.Storage         s_from ON s_from.id = h.from_storage_id
-LEFT JOIN dbo.Storage    s_to   ON s_to.id   = h.to_storage_id
-WHERE h.id IN @ids;",
-                    new { ids }, transaction: tran, cancellationToken: ct))).ToList();
+//             var tasks = (await conn.QueryAsync<HistoryTask>(
+//                 new CommandDefinition(@"
+// SELECT 
+//     h.id              AS HistoryId,
+//     h.file_id         AS FileId,
+//     h.from_storage_id AS FromStorageId,
+//     h.to_storage_id   AS ToStorageId,
+//     f.filename        AS FileName,
+//     f.UserBit         AS UserBit,
+//     s_from.location   AS FromPath,
+//     s_to.location     AS ToPath,
+//     s_from.set_group  AS FromGroup,
+//     s_to.set_group    AS ToGroup,
+//     h.priority        AS Priority,
+//     CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData
+// FROM dbo.FileData_History h
+// LEFT JOIN dbo.FileData   f      ON f.id      = h.file_id
+// JOIN dbo.Storage         s_from ON s_from.id = h.from_storage_id
+// LEFT JOIN dbo.Storage    s_to   ON s_to.id   = h.to_storage_id
+// WHERE h.id IN @ids;",
+//                     new { ids }, transaction: tran, cancellationToken: ct))).ToList();
 
-            tran.Commit();
-            return tasks;
-        }
+//             tran.Commit();
+//             return tasks;
+//         }
 
         /// <summary>
 /// Slot-based 搬移：一次領取「一筆」 copy 任務：
@@ -480,6 +515,8 @@ public async Task<HistoryTask?> ClaimCopyTopOneAsync(
         var dbConn = (DbConnection)conn;
         await dbConn.OpenAsync(ct);
         using var tran = dbConn.BeginTransaction();
+        var nodeName = _nodeName; // ⭐ 這台節點名稱
+        var useNodeFilter = !string.IsNullOrWhiteSpace(nodeName);
 
         // 🔹 先標記「來源 StorageId 無效」→ 901
         await conn.ExecuteAsync(new CommandDefinition(@"
@@ -509,8 +546,9 @@ WHERE h.action = 'copy'
   AND s_to.id IS NULL;        -- 找不到目的地 Storage
 ",
             transaction: tran,
-            cancellationToken: ct));
-
+            cancellationToken: ct
+            ));
+       
         // 🔹 撿一筆「目前最該跑的任務」→ 立刻改成 1，並直接輸出成 HistoryTask
         var task = await conn.QueryFirstOrDefaultAsync<HistoryTask>(
             new CommandDefinition(@"
@@ -521,10 +559,12 @@ WHERE h.action = 'copy'
     WHERE
             h.action = 'copy'
         AND (@group IS NULL OR s_from.set_group = @group)
-        AND h.file_status IN (
-            0,    800      -- 新任務
-            
-        )
+        AND h.file_status IN (0, 800)
+        -- ⭐ 有啟用 Node 篩選 → 只撿 assigned_node = 自己
+        AND (
+      @useNodeFilter = 0
+   OR h.assigned_node = @nodeName
+)
     ORDER BY 
         ISNULL(h.priority, 1) DESC,
         h.create_time ASC,
@@ -551,9 +591,9 @@ LEFT JOIN dbo.FileData   f      ON f.id      = h.file_id
 JOIN dbo.Storage         s_from ON s_from.id = h.from_storage_id
 LEFT JOIN dbo.Storage    s_to   ON s_to.id   = h.to_storage_id
 JOIN P ON P.id = h.id;",
-                new {  group },
-                transaction: tran,
-                cancellationToken: ct));
+                new { group, nodeName, useNodeFilter },
+        transaction: tran,
+        cancellationToken: ct));
 
         tran.Commit();
         // 如果沒有撿到（task == null），SlotLoop 那邊就會去 sleep 一下
@@ -665,6 +705,7 @@ SELECT TOP (@n)
     h.action             AS Action,
     h.create_time        AS CreateTime,
     h.update_time        AS UpdateTime,
+    h.assigned_node      AS AssignedNode,
     CAST(h.file_status AS int) AS Status
 FROM dbo.FileData_History AS h
 JOIN dbo.FileData   AS f       ON f.id = h.file_id
@@ -694,85 +735,85 @@ ORDER BY h.update_time DESC, h.id DESC;";
         /// <summary>
         /// 批次版：領取刪除任務
         /// </summary>
-        public async Task<List<HistoryTask>> ClaimDeleteAsync(
-            int batchSize,
-            int retryMinutes,
-            string? group,
-            CancellationToken ct)
-        {
-            using var conn = _factory.Create();
-            await (conn as DbConnection)!.OpenAsync(ct);
-            using var tran = (conn as DbConnection)!.BeginTransaction();
+//         public async Task<List<HistoryTask>> ClaimDeleteAsync(
+//             int batchSize,
+//             int retryMinutes,
+//             string? group,
+//             CancellationToken ct)
+//         {
+//             using var conn = _factory.Create();
+//             await (conn as DbConnection)!.OpenAsync(ct);
+//             using var tran = (conn as DbConnection)!.BeginTransaction();
 
-            // 🔹 delete 任務：來源 StorageId 無效 → 901
-            await conn.ExecuteAsync(new CommandDefinition(@"
-UPDATE h
-SET h.file_status = 901,
-    h.update_time = GETDATE()
-FROM dbo.FileData_History h
-LEFT JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
-WHERE h.action = 'delete'
-  AND h.file_status IN (-1, 1)
-  AND s_from.id IS NULL;      -- 找不到來源 Storage
-",
-                transaction: tran, cancellationToken: ct));
+//             // 🔹 delete 任務：來源 StorageId 無效 → 901
+//             await conn.ExecuteAsync(new CommandDefinition(@"
+// UPDATE h
+// SET h.file_status = 901,
+//     h.update_time = GETDATE()
+// FROM dbo.FileData_History h
+// LEFT JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
+// WHERE h.action = 'delete'
+//   AND h.file_status IN (-1, 1)
+//   AND s_from.id IS NULL;      -- 找不到來源 Storage
+// ",
+//                 transaction: tran, cancellationToken: ct));
 
-            var ids = await conn.QueryAsync<int>(
-                new CommandDefinition(@"
-;WITH P AS (
-  SELECT TOP (@n) h.id
-  FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
-  JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
-  WHERE
-        h.action = 'delete'
-    AND (@group IS NULL OR s_from.set_group = @group)
-    AND (
-            h.file_status = -1
-         OR (h.file_status = 1
-             AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
-        )
-  ORDER BY 
-    ISNULL(h.priority, 1) DESC,
-    h.create_time ASC,
-    h.id ASC
-)
-UPDATE h
-SET h.file_status = 1,
-    h.update_time = GETDATE()
-OUTPUT inserted.id
-FROM dbo.FileData_History h
-JOIN P ON P.id = h.id;",
-                    new { n = batchSize, retryMin = retryMinutes, group },
-                    transaction: tran, cancellationToken: ct));
+//             var ids = await conn.QueryAsync<int>(
+//                 new CommandDefinition(@"
+// ;WITH P AS (
+//   SELECT TOP (@n) h.id
+//   FROM dbo.FileData_History h WITH (UPDLOCK, READPAST, ROWLOCK)
+//   JOIN dbo.Storage s_from ON s_from.id = h.from_storage_id
+//   WHERE
+//         h.action = 'delete'
+//     AND (@group IS NULL OR s_from.set_group = @group)
+//     AND (
+//             h.file_status = -1
+//          OR (h.file_status = 1
+//              AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
+//         )
+//   ORDER BY 
+//     ISNULL(h.priority, 1) DESC,
+//     h.create_time ASC,
+//     h.id ASC
+// )
+// UPDATE h
+// SET h.file_status = 1,
+//     h.update_time = GETDATE()
+// OUTPUT inserted.id
+// FROM dbo.FileData_History h
+// JOIN P ON P.id = h.id;",
+//                     new { n = batchSize, retryMin = retryMinutes, group },
+//                     transaction: tran, cancellationToken: ct));
 
-            List<HistoryTask> tasks = new();
-            if (ids.Any())
-            {
-                tasks = (await conn.QueryAsync<HistoryTask>(
-                    new CommandDefinition(@"
-SELECT 
-  h.id              AS HistoryId,
-  h.file_id         AS FileId,
-  h.from_storage_id AS FromStorageId,
-  h.to_storage_id   AS ToStorageId,
-  f.filename        AS FileName,
-  f.UserBit         AS UserBit,
-  s_from.location   AS FromPath,
-  s_to.location     AS ToPath,
-  s_from.set_group  AS FromGroup,
-  s_to.set_group    AS ToGroup,
-  CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData
-FROM dbo.FileData_History h
-LEFT JOIN dbo.FileData f     ON f.id       = h.file_id
-JOIN dbo.Storage s_from      ON s_from.id  = h.from_storage_id
-LEFT JOIN dbo.Storage s_to   ON s_to.id    = h.to_storage_id
-WHERE h.id IN @ids;",
-                        new { ids }, transaction: tran, cancellationToken: ct))).ToList();
-            }
+//             List<HistoryTask> tasks = new();
+//             if (ids.Any())
+//             {
+//                 tasks = (await conn.QueryAsync<HistoryTask>(
+//                     new CommandDefinition(@"
+// SELECT 
+//   h.id              AS HistoryId,
+//   h.file_id         AS FileId,
+//   h.from_storage_id AS FromStorageId,
+//   h.to_storage_id   AS ToStorageId,
+//   f.filename        AS FileName,
+//   f.UserBit         AS UserBit,
+//   s_from.location   AS FromPath,
+//   s_to.location     AS ToPath,
+//   s_from.set_group  AS FromGroup,
+//   s_to.set_group    AS ToGroup,
+//   CASE WHEN f.id IS NULL THEN 0 ELSE 1 END AS HasFileData
+// FROM dbo.FileData_History h
+// LEFT JOIN dbo.FileData f     ON f.id       = h.file_id
+// JOIN dbo.Storage s_from      ON s_from.id  = h.from_storage_id
+// LEFT JOIN dbo.Storage s_to   ON s_to.id    = h.to_storage_id
+// WHERE h.id IN @ids;",
+//                         new { ids }, transaction: tran, cancellationToken: ct))).ToList();
+//             }
 
-            tran.Commit();
-            return tasks;
-        }
+//             tran.Commit();
+//             return tasks;
+//         }
 
         /// <summary>
         /// slot 版：領取一筆刪除任務
@@ -785,7 +826,9 @@ WHERE h.id IN @ids;",
             using var conn = _factory.Create();
             await (conn as DbConnection)!.OpenAsync(ct);
             using var tran = (conn as DbConnection)!.BeginTransaction();
-
+            // ⭐ 這台節點名稱
+            var nodeName = _nodeName;
+            var useNodeFilter = !string.IsNullOrWhiteSpace(nodeName);
             // 🔹 delete 任務：來源 StorageId 無效 → 901
             await conn.ExecuteAsync(new CommandDefinition(@"
 UPDATE h
@@ -814,6 +857,11 @@ WHERE h.action = 'delete'
          OR (h.file_status = 1
              AND DATEDIFF(MINUTE, h.update_time, GETDATE()) >= @retryMin)
         )
+            -- ⭐ Node 篩選：有設定 NodeName → 撿 NULL 或自己的
+  AND (
+      @useNodeFilter = 0
+   OR h.assigned_node = @nodeName
+)
   ORDER BY 
     ISNULL(h.priority, 1) DESC,
     h.create_time ASC,
@@ -825,8 +873,9 @@ SET h.file_status = 1,
 OUTPUT inserted.id
 FROM dbo.FileData_History h
 JOIN P ON P.id = h.id;",
-                    new { retryMin = retryMinutes, group },
-                    transaction: tran, cancellationToken: ct));
+                   new { retryMin = retryMinutes, group, nodeName, useNodeFilter },
+            transaction: tran,
+            cancellationToken: ct));
 
             if (!id.HasValue)
             {
@@ -853,7 +902,9 @@ LEFT JOIN dbo.FileData f     ON f.id       = h.file_id
 JOIN dbo.Storage s_from      ON s_from.id  = h.from_storage_id
 LEFT JOIN dbo.Storage s_to   ON s_to.id    = h.to_storage_id
 WHERE h.id = @id;",
-                    new { id }, transaction: tran, cancellationToken: ct));
+                    new { id },
+        transaction: tran,
+        cancellationToken: ct));
 
             tran.Commit();
             return task;
@@ -987,6 +1038,7 @@ SET file_status = CASE
         WHEN action = 'delete' THEN -1   -- 刪除任務 → 回到 -1
         ELSE 0                           -- 其他（copy）→ 回到 0
     END,
+    assigned_node = NULL,
     update_time = GETDATE()
 WHERE id = @id
   AND file_status IN (
@@ -1038,7 +1090,7 @@ WHERE id = @id;";
             public async Task ResetRunningJobsAsync(CancellationToken ct)
             {
                 using var conn = _factory.Create();
-
+                var nodeName = _nodeName;
                 const string sql = @"
             UPDATE dbo.FileData_History
             SET 
@@ -1046,12 +1098,14 @@ WHERE id = @id;";
                     WHEN action = 'delete' THEN -1   -- 刪除任務：回到 -1（待刪除）
                     ELSE 0                           -- 其他（目前就是 copy）：回到 0（待搬移）
                 END,
+                assigned_node = NULL, 
                 update_time = GETDATE()
             WHERE file_status = 1
-            AND action IN ('copy', 'delete');      -- 只處理這兩種任務
+            AND action IN ('copy', 'delete')     -- 只處理這兩種任務
+            AND (@nodeName IS NULL OR @nodeName = '' OR assigned_node = @nodeName);
             ";
 
-                await conn.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+                await conn.ExecuteAsync(new CommandDefinition(sql,  new { nodeName }, cancellationToken: ct));
             }
     }
     

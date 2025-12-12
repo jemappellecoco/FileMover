@@ -72,12 +72,13 @@ export function initHistory(root) {
           <th style="width:220px;">檔名(UserBit)</th>
           <th style="width:150px;">來源 Storage</th>
           <th style="width:150px;">目的 Storage</th>
+          <th style="width:120px;">節點</th>
           <th style="width:170px;">UpdateTime</th>
           <th style="width:100px;">Status</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>
+        <tr><td colspan="8" style="text-align:center;color:#999;">載入中…</td></tr>
       </tbody>
     </table>
   `;
@@ -145,7 +146,7 @@ export function initHistory(root) {
   function renderRows(rows) {
     if (!rows.length) {
       $tbody.innerHTML =
-        `<tr><td colspan="7" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
+        `<tr><td colspan="8" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
       $count.textContent = '0 筆';
       currentRows = [];
       return;
@@ -165,6 +166,7 @@ export function initHistory(root) {
         <td>${r.fileName || ''}</td>
         <td>${r.sourceStorage || ''}</td>
         <td>${r.destStorage || ''}</td>
+        <td>${r.assignedNode || '-'}</td>
         <td>${fmtDate(r.updateTime)}</td>
         <td>${pill(label, tooltip)}
         ${canRetry ? `<button class="btn-retry" data-id="${r.historyId}" style="margin-left:6px;padding:2px 8px;font-size:12px;">重試</button>` : ''}
@@ -231,7 +233,7 @@ export function initHistory(root) {
       $btnReload.disabled = true;
       $btnReload.textContent = '載入中…';
       $tbody.innerHTML =
-        `<tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>`;
+        `<tr><td colspan="8" style="text-align:center;color:#999;">載入中…</td></tr>`;
       $count.textContent = '';
     }
 

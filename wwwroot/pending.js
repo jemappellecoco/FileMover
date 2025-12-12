@@ -16,7 +16,7 @@ export function initPending(root, statusLine) {
           <option value="4F">4F</option>
           <option value="7F">7F</option>
         </select>
-      </label>-->
+      </label>
 
       <label>
         並行數：
@@ -24,7 +24,7 @@ export function initPending(root, statusLine) {
           ${[1,2,3,4,5,6,7,8,9,10].map(v => `<option value="${v}">${v}</option>`).join('')}
         </select>
       </label>
-      <button id="btnSetParallel">套用</button>
+      <button id="btnSetParallel">套用</button>-->
 
       <button id="btnCancelSelected"
         style="
@@ -61,6 +61,7 @@ export function initPending(root, statusLine) {
             <th style="width:100px;">檔名(UserBit)</th>
             <th style="width:80px;">來源</th>
             <th style="width:80px;">目的地</th>
+            <th style="width:90px;">節點</th>
             <th style="width:220px;">狀態</th>
             <th style="width:220px;">進度</th>
             <th style="width:80px;">取消</th>
@@ -110,12 +111,13 @@ export function initPending(root, statusLine) {
               <th style="width:220px;">檔名(UserBit)</th>
               <th style="width:150px;">來源 Storage</th>
               <th style="width:150px;">目的 Storage</th>
+              <th style="width:120px;">節點</th>       
               <th style="width:170px;">UpdateTime</th>
               <th style="width:100px;">Status</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>
+            <tr><td colspan="8" style="text-align:center;color:#999;">載入中…</td></tr>
           </tbody>
         </table>
       </div>
@@ -127,7 +129,7 @@ export function initPending(root, statusLine) {
   const $tableBody    = root.querySelector('#pendingTable tbody');
   const $count        = root.querySelector('#pendingCount');
   // const $selGroup     = root.querySelector('#selGroup');
-  const $selParallel  = root.querySelector('#selParallel');
+  // const $selParallel  = root.querySelector('#selParallel');
   const $btnSetPar    = root.querySelector('#btnSetParallel');
   const $btnCancelSelected= root.querySelector('#btnCancelSelected');
   const $chkAll           = root.querySelector('#chkPendingAll');
@@ -207,7 +209,7 @@ export function initPending(root, statusLine) {
 
     if (!rows.length) {
       $histTbody.innerHTML =
-        `<tr><td colspan="7" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
+        `<tr><td colspan="8" style="text-align:center;color:#999;">（沒有符合條件的紀錄）</td></tr>`;
       if ($histCount) $histCount.textContent = '0 筆';
       histCurrentRows = [];
       return;
@@ -228,6 +230,7 @@ export function initPending(root, statusLine) {
         <td>${r.fileName || ''}</td>
         <td>${r.sourceStorage || ''}</td>
         <td>${r.destStorage || ''}</td>
+        <td>${r.assignedNode || '-'}</td>
         <td>${histFmtDate(r.updateTime)}</td>
         <td>
           ${histPill(label, tooltip)}
@@ -299,7 +302,7 @@ export function initPending(root, statusLine) {
         $btnHistReload.textContent = '載入中…';
       }
       $histTbody.innerHTML =
-        `<tr><td colspan="7" style="text-align:center;color:#999;">載入中…</td></tr>`;
+        `<tr><td colspan="8" style="text-align:center;color:#999;">載入中…</td></tr>`;
       if ($histCount) $histCount.textContent = '';
     }
 
@@ -325,7 +328,7 @@ export function initPending(root, statusLine) {
       console.error(e);
       if (!silent) {
         $histTbody.innerHTML =
-          `<tr><td colspan="7" style="color:#c00;">載入失敗：${e.message}</td></tr>`;
+          `<tr><td colspan="8" style="color:#c00;">載入失敗：${e.message}</td></tr>`;
       }
     } finally {
       if (!silent && $btnHistReload) {
@@ -362,9 +365,11 @@ export function initPending(root, statusLine) {
     const target = e.target;
     if (!target) return;
 
-    if (target.classList.contains('pri-select') ||
+    if (target.classList.contains('pri-select') 
+      // ||
         // target === $selGroup ||
-        target === $selParallel) {
+        // target === $selParallel
+      ) {
       isSelectBusy = true;
     }
   });
@@ -374,9 +379,11 @@ export function initPending(root, statusLine) {
     const t = e.target;
     if (!t) return;
 
-    if (!t.classList.contains('pri-select') &&
+    if (!t.classList.contains('pri-select') 
+      // &&
         // t !== $selGroup &&
-        t !== $selParallel) {
+        // t !== $selParallel
+      ) {
       isSelectBusy = false;
     }
   });
@@ -424,30 +431,30 @@ export function initPending(root, statusLine) {
 
 
   // ====== 讀 /api/config/concurrency，套用到「並行數」下拉 ======
-  async function loadConcurrency() {
-    try {
-      const resp = await fetch(API_CONCUR, { cache: 'no-store' });
-      if (!resp.ok) return;
+  // async function loadConcurrency() {
+  //   try {
+  //     const resp = await fetch(API_CONCUR, { cache: 'no-store' });
+  //     if (!resp.ok) return;
 
-      const data = await resp.json();   // 期待 { current: 2 }
-      if (typeof data.current === 'number') {
-        const v = String(data.current);
+  //     const data = await resp.json();   // 期待 { current: 2 }
+  //     if (typeof data.current === 'number') {
+  //       const v = String(data.current);
 
-        // 如果下拉沒有這個值，就動態補一個 option
-        const hasOption = Array.from($selParallel.options).some(o => o.value === v);
-        if (!hasOption) {
-          const opt = document.createElement('option');
-          opt.value = v;
-          opt.textContent = v;
-          $selParallel.appendChild(opt);
-        }
+  //       // 如果下拉沒有這個值，就動態補一個 option
+  //       const hasOption = Array.from($selParallel.options).some(o => o.value === v);
+  //       if (!hasOption) {
+  //         const opt = document.createElement('option');
+  //         opt.value = v;
+  //         opt.textContent = v;
+  //         $selParallel.appendChild(opt);
+  //       }
 
-        $selParallel.value = v;
-      }
-    } catch (err) {
-      console.warn('loadConcurrency error', err);
-    }
-  }
+  //       $selParallel.value = v;
+  //     }
+  //   } catch (err) {
+  //     console.warn('loadConcurrency error', err);
+  //   }
+  // }
   function getRealNameFromPath(path) {
       if (!path) return '';
       return String(path).split(/[/\\]/).pop() || '';
@@ -462,7 +469,8 @@ export function initPending(root, statusLine) {
     const fileName    = r.fileName || '';
     const source      = r.sourceStorage || r.sourcePath || '';
     const dest        = r.destStorage   || r.destPath   || '';
-
+    // 節點名稱
+    const node        = r.assignedNode || '';
     const statusCode  = r.status;
     const retryCount   = typeof r.retryCount === 'number' ? r.retryCount : 0;
     const retryCode    = (typeof r.retryCode === 'number' ? r.retryCode : null);
@@ -532,6 +540,7 @@ if (existing) {
       <td>${fileName}</td>
       <td>${source}</td>
       <td>${dest}</td>
+      <td>${node || '-'}</td>
       <td>${statusText}${retryHtml}</td>
       <td>
         <div class="progress-wrap" data-progress-key="${key}">
@@ -682,7 +691,7 @@ if (existing) {
         const tr  = wrap.closest('tr');
         if (!tr) return;
 
-        const statusCell = tr.children[7];
+        const statusCell = tr.children[8];
         const sel        = tr.querySelector('.pri-select');
 
         const isActive = p > 0 && p < 100;
@@ -895,36 +904,36 @@ if (existing) {
     }
   }
 
-  // 並行數 change：也順便解除 busy（選完了）
-  $selParallel.addEventListener('change', () => {
-    isSelectBusy = false;
-  });
+  // // 並行數 change：也順便解除 busy（選完了）
+  // $selParallel.addEventListener('change', () => {
+  //   isSelectBusy = false;
+  // });
 
   // ====== 並行數「套用」 ======
-  $btnSetPar.addEventListener('click', async () => {
-    const v = parseInt($selParallel.value, 10);
-    if (isNaN(v)) return;
+  // $btnSetPar.addEventListener('click', async () => {
+  //   const v = parseInt($selParallel.value, 10);
+  //   if (isNaN(v)) return;
 
-    try {
-      const resp = await fetch(API_CONCUR, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(v)
-      });
+  //   try {
+  //     const resp = await fetch(API_CONCUR, {
+  //       method: 'POST',
+  //       headers: { 'Content-Type': 'application/json' },
+  //       body: JSON.stringify(v)
+  //     });
 
-      if (!resp.ok) {
-        const txt = await resp.text();
-        alert('更新失敗：' + txt);
-        return;
-      }
+  //     if (!resp.ok) {
+  //       const txt = await resp.text();
+  //       alert('更新失敗：' + txt);
+  //       return;
+  //     }
 
-      const data = await resp.json();
-      alert('並行數已更新為：' + data.current + '\n新任務會用新的設定。');
-    } catch (err) {
-      console.error(err);
-      alert('呼叫 API 失敗：' + err.message);
-    }
-  });
+  //     const data = await resp.json();
+  //     alert('並行數已更新為：' + data.current + '\n新任務會用新的設定。');
+  //   } catch (err) {
+  //     console.error(err);
+  //     alert('呼叫 API 失敗：' + err.message);
+  //   }
+  // });
 
   // ====== SSE listener ======
   function startProgressListener() {
@@ -985,7 +994,7 @@ if (existing) {
 
   // ====== 啟動 ======
   loadPending(false);
-  loadConcurrency();
+  // loadConcurrency();
   startProgressListener();
   startAutoRefresh();
 // ⭐ 歷史區塊初次載入 + 每 5 秒靜默刷新

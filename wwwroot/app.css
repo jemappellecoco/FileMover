@@ -159,3 +159,31 @@ tr:hover td { background: #f3f4f6; }
 .ok     { background:#e6f6ec; color:#146c2e; border:1px solid #b9ebcd; }
 .fail   { background:#fdecec; color:#b42318; border:1px solid #f7c6c5; }
 .pending{ background:#fff7ed; color:#c05621; border:1px solid #fed7aa; }
+
+/* === Nodes 狀態 pill（Online / Offline） === */
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:2px 10px;
+  border-radius:999px;
+  font-size:12px;
+  font-weight:700;
+  line-height:20px;
+  border:1px solid transparent;
+  white-space: nowrap;
+}
+
+/* Online：綠色 */
+.pill-online{
+  background: #e6f6ec;
+  color: #146c2e;
+  border-color: #b9ebcd;
+}
+
+/* Offline：紅色 */
+.pill-offline{
+  background:#fdecec;
+  color:#b42318;
+  border-color:#f7c6c5;
+}

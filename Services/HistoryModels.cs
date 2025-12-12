@@ -24,5 +24,7 @@ namespace FileMoverWeb.Services
         public DateTime UpdateTime { get; set; }
 
         public string? Error { get; set; }    
+        public string? AssignedNode { get; set; }
+
     }
 }
